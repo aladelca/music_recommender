@@ -235,18 +235,18 @@ Never log these values. Tests should use fake values.
    - Notes: Add FastAPI as a dependency. Keep route handlers thin and move business logic into
      services so unit tests do not need ASGI.
 
-2. [ ] Add API and agent configuration.
+2. [x] Add API and agent configuration.
    - Files: `src/music_recommender/config.py`, `.env.example`, `README.md`
    - Notes: Add OpenAI, Spotify OAuth, data-root, and AWS deployment settings. Validate required
      settings at startup without printing secret values.
 
-3. [ ] Add Spotify user OAuth support.
+3. [x] Add Spotify user OAuth support.
    - Files: `src/music_recommender/sources/spotify_user.py`, `tests/test_spotify_user_client.py`
    - Notes: Keep the existing client-credentials `SpotifyClient` for catalog extraction. Add a new
      user-scoped client for OAuth token refresh, current profile, top tracks/artists, saved tracks,
      playlist creation, and adding playlist items. Use `httpx.MockTransport` tests.
 
-4. [ ] Add a one-time demo auth setup path.
+4. [x] Add a one-time demo auth setup path.
    - Files: `src/music_recommender/spotify_auth_cli.py` or API routes under
      `src/music_recommender/api/routes/spotify_auth.py`, `pyproject.toml`, `.env.example`
    - Notes: For class demo reliability, prefer a CLI that opens/copies the authorization URL and
@@ -258,7 +258,8 @@ Never log these values. Tests should use fake values.
      `src/music_recommender/recommender/catalog.py`, `tests/test_recommender_data.py`
    - Notes: Load local or S3 Parquet for tracks, audio features, lyrics NLP, and catalog-linked
      interactions. Start with small in-memory tables for demo scale. Do not require live extraction
-     during an API request.
+     during an API request. Phase 0 only added a local readiness check for required tracks and audio
+     feature Parquet outputs; the full recommender reader remains Phase 1 work.
 
 6. [ ] Define recommendation domain models and deterministic scoring.
    - Files: `src/music_recommender/recommender/models.py`,
@@ -354,6 +355,17 @@ Exit criteria:
 - A local script can read extracted Parquet tracks/audio features.
 - A local script can refresh a Spotify user access token.
 - No API server or agent is required yet.
+
+Implementation status on 2026-07-02:
+
+- Added `music-recommender-demo-readiness check-data`, which reads local `silver/tracks` and
+  `silver/audio_features` Parquet outputs and reports row counts.
+- Added `music-recommender-demo-readiness auth-url`, `exchange-code`, and
+  `refresh-spotify-token` for the one-time Spotify user OAuth flow.
+- Added Spotify user OAuth support for token refresh, current profile, top items, saved tracks,
+  playlist creation, and adding playlist items.
+- Confirmed the local `smoke-reccobeats-parquet` run has readable tracks/audio features.
+- Live token refresh still requires adding `SPOTIFY_USER_REFRESH_TOKEN` to `.env`.
 
 ### Phase 1: Deterministic Recommender Core
 

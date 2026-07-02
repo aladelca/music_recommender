@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "music_recommender",
+  "project_id": "fd58c026-4d97-4567-8f04-cffaf1c94261"
+}

@@ -101,6 +101,53 @@ uv run music-recommender-network \
   --limit 10000
 ```
 
+## Beta Demo Readiness
+
+Phase 0 checks that local recommender data is readable and that Spotify user OAuth can refresh a
+token for profile reads and playlist creation. Keep real tokens in `.env`; do not commit them.
+
+Required demo variables:
+
+```bash
+OPENAI_API_KEY=...
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/spotify/callback
+SPOTIFY_USER_REFRESH_TOKEN=...
+SPOTIFY_DEMO_USER_ID=12175364859
+SPOTIFY_USER_SCOPES="user-top-read user-library-read playlist-modify-private playlist-modify-public"
+RECOMMENDER_DATA_ROOT=data/local
+RECOMMENDER_DATA_MODE=local
+```
+
+Generate the Spotify authorization URL:
+
+```bash
+uv run music-recommender-demo-readiness auth-url
+```
+
+After approving the app in Spotify and copying the returned `code`, exchange it locally. Use
+`--show-refresh-token` only when you are ready to copy the token into `.env`.
+
+```bash
+uv run music-recommender-demo-readiness exchange-code \
+  --code "<spotify-callback-code>" \
+  --show-refresh-token
+```
+
+Validate the local extracted catalog inputs:
+
+```bash
+uv run music-recommender-demo-readiness check-data \
+  --data-root data/local \
+  --run-id smoke-reccobeats-parquet
+```
+
+Validate that the configured refresh token can produce a new user access token without printing the
+access token value:
+
+```bash
+uv run music-recommender-demo-readiness refresh-spotify-token
+```
+
 ## Validation
 
 ```bash

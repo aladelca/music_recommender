@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 music-recommender-extract = "music_recommender.cli:main"
 music-recommender-network = "music_recommender.network_cli:main"
+music-recommender-demo-readiness = "music_recommender.demo_readiness_cli:main"
 
 [project.optional-dependencies]
 nlp = [

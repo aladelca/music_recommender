@@ -8,6 +8,7 @@ from typing import Literal
 from dotenv import load_dotenv
 
 AudioFeatureSource = Literal["none", "reccobeats", "spotify"]
+RecommenderDataMode = Literal["local", "s3"]
 OutputFileFormat = Literal["jsonl", "parquet"]
 
 
@@ -15,9 +16,15 @@ OutputFileFormat = Literal["jsonl", "parquet"]
 class Settings:
     spotify_client_id: str
     spotify_client_secret: str
+    openai_api_key: str | None
+    openai_agent_model: str | None
     aws_region: str
     bucket: str | None
     spotify_market: str
+    spotify_redirect_uri: str
+    spotify_user_refresh_token: str | None
+    spotify_demo_user_id: str
+    spotify_user_scopes: tuple[str, ...]
     max_tracks_per_artist: int
     enable_spotify_audio_features: bool
     audio_feature_source: AudioFeatureSource
@@ -29,6 +36,10 @@ class Settings:
     lyrics_nlp_batch_size: int
     listenbrainz_dump_path: Path | None
     listenbrainz_user_hash_salt: str
+    recommender_data_root: Path
+    recommender_data_mode: RecommenderDataMode
+    recommender_demo_user_id: str | None
+    aws_secrets_prefix: str | None
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -71,6 +82,28 @@ def _get_optional_path(name: str) -> Path | None:
     return Path(value).expanduser()
 
 
+def _get_optional_str(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip()
+
+
+def _get_path(name: str, default: str) -> Path:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return Path(default)
+    return Path(value).expanduser()
+
+
+def _get_scopes(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.replace(",", " ")
+    return tuple(scope.strip() for scope in normalized.split() if scope.strip())
+
+
 def load_settings(env_file: Path | str = ".env", *, require_bucket: bool = False) -> Settings:
     env_path = Path(env_file)
     if env_path.exists():
@@ -95,9 +128,26 @@ def load_settings(env_file: Path | str = ".env", *, require_bucket: bool = False
     return Settings(
         spotify_client_id=spotify_client_id,
         spotify_client_secret=spotify_client_secret,
+        openai_api_key=_get_optional_str("OPENAI_API_KEY"),
+        openai_agent_model=_get_optional_str("OPENAI_AGENT_MODEL"),
         aws_region=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1",
         bucket=bucket,
         spotify_market=os.getenv("SPOTIFY_MARKET", "US"),
+        spotify_redirect_uri=os.getenv(
+            "SPOTIFY_REDIRECT_URI",
+            "http://127.0.0.1:8080/spotify/callback",
+        ),
+        spotify_user_refresh_token=_get_optional_str("SPOTIFY_USER_REFRESH_TOKEN"),
+        spotify_demo_user_id=os.getenv("SPOTIFY_DEMO_USER_ID", "12175364859"),
+        spotify_user_scopes=_get_scopes(
+            "SPOTIFY_USER_SCOPES",
+            (
+                "user-top-read",
+                "user-library-read",
+                "playlist-modify-private",
+                "playlist-modify-public",
+            ),
+        ),
         max_tracks_per_artist=max_tracks,
         enable_spotify_audio_features=_get_bool("ENABLE_SPOTIFY_AUDIO_FEATURES"),
         audio_feature_source=_get_choice(
@@ -116,4 +166,8 @@ def load_settings(env_file: Path | str = ".env", *, require_bucket: bool = False
         lyrics_nlp_batch_size=_get_int("LYRICS_NLP_BATCH_SIZE", 8),
         listenbrainz_dump_path=_get_optional_path("LISTENBRAINZ_DUMP_PATH"),
         listenbrainz_user_hash_salt=os.getenv("LISTENBRAINZ_USER_HASH_SALT", ""),
+        recommender_data_root=_get_path("RECOMMENDER_DATA_ROOT", "data/local"),
+        recommender_data_mode=_get_choice("RECOMMENDER_DATA_MODE", "local", {"local", "s3"}),
+        recommender_demo_user_id=_get_optional_str("RECOMMENDER_DEMO_USER_ID"),
+        aws_secrets_prefix=_get_optional_str("AWS_SECRETS_PREFIX"),
     )

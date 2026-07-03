@@ -37,6 +37,20 @@ def test_load_settings_validates_recommender_data_mode(monkeypatch: pytest.Monke
         load_settings(env_file=Path("does-not-exist.env"))
 
 
+def test_load_settings_preserves_s3_recommender_data_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPOTIFY_APP_CLIENT_ID", "client")
+    monkeypatch.setenv("SPOTIFY_APP_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("RECOMMENDER_DATA_MODE", "s3")
+    monkeypatch.setenv("RECOMMENDER_DATA_ROOT", "s3://music-recommender-demo/")
+
+    settings = load_settings(env_file=Path("does-not-exist.env"))
+
+    assert settings.recommender_data_mode == "s3"
+    assert settings.recommender_data_root == "s3://music-recommender-demo"
+
+
 def test_load_settings_parses_scope_list(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SPOTIFY_APP_CLIENT_ID", "client")
     monkeypatch.setenv("SPOTIFY_APP_CLIENT_SECRET", "secret")

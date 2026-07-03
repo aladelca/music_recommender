@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from io import BytesIO
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 import pyarrow.parquet as pq
 
 JsonReadyDict = dict[str, object]
+JsonDict = dict[str, Any]
 
 REQUIRED_READINESS_DATASETS = ("silver/tracks", "silver/audio_features")
 
@@ -76,6 +80,21 @@ def check_local_recommender_data(
     raise MissingRecommenderDataError(f"No local recommender runs found under {root}")
 
 
+def read_dataset_records(
+    location: Path | str,
+    *,
+    s3_client: Any | None = None,
+) -> list[JsonDict]:
+    location_text = str(location)
+    if location_text.startswith("s3://"):
+        return _read_s3_records(location_text, s3_client=s3_client)
+
+    records: list[JsonDict] = []
+    for data_file in _data_files(Path(location)):
+        records.extend(_read_data_file(data_file))
+    return records
+
+
 def _check_run(
     *,
     root: Path,
@@ -128,6 +147,81 @@ def _row_count(path: Path) -> int:
     if path.suffix == ".jsonl":
         return _jsonl_row_count(path)
     raise ValueError(f"Unsupported data file format: {path}")
+
+
+def _read_data_file(path: Path) -> list[JsonDict]:
+    if path.suffix == ".parquet":
+        table = pq.read_table(path)  # type: ignore[no-untyped-call]
+        return [dict(record) for record in table.to_pylist()]
+    if path.suffix == ".jsonl":
+        return _read_jsonl_records(path)
+    raise ValueError(f"Unsupported data file format: {path}")
+
+
+def _read_jsonl_records(path: Path) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            if line.strip():
+                payload: Any = json.loads(line)
+                if isinstance(payload, dict):
+                    rows.append(payload)
+    return rows
+
+
+def _read_s3_records(location: str, *, s3_client: Any | None) -> list[JsonDict]:
+    parsed = urlparse(location)
+    if parsed.scheme != "s3" or not parsed.netloc:
+        raise ValueError(f"Invalid S3 dataset location: {location}")
+    client = s3_client or _default_s3_client()
+    bucket = parsed.netloc
+    prefix = _normalize_s3_prefix(parsed.path.lstrip("/"))
+    records: list[JsonDict] = []
+    for key in _s3_data_keys(client, bucket=bucket, prefix=prefix):
+        body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        if key.endswith(".parquet"):
+            table = pq.read_table(BytesIO(body))  # type: ignore[no-untyped-call]
+            records.extend(dict(record) for record in table.to_pylist())
+        elif key.endswith(".jsonl"):
+            records.extend(_jsonl_bytes_records(body))
+    return records
+
+
+def _s3_data_keys(client: Any, *, bucket: str, prefix: str) -> list[str]:
+    keys: list[str] = []
+    kwargs: dict[str, str] = {"Bucket": bucket, "Prefix": prefix}
+    while True:
+        response = client.list_objects_v2(**kwargs)
+        for item in response.get("Contents", []):
+            key = str(item.get("Key", ""))
+            if key.endswith((".parquet", ".jsonl")):
+                keys.append(key)
+        if not response.get("IsTruncated"):
+            break
+        kwargs["ContinuationToken"] = str(response["NextContinuationToken"])
+    return sorted(keys)
+
+
+def _jsonl_bytes_records(body: bytes) -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for line in body.decode("utf-8").splitlines():
+        if line.strip():
+            payload: Any = json.loads(line)
+            if isinstance(payload, dict):
+                rows.append(payload)
+    return rows
+
+
+def _normalize_s3_prefix(prefix: str) -> str:
+    if not prefix or prefix.endswith("/") or prefix.endswith((".parquet", ".jsonl")):
+        return prefix
+    return f"{prefix}/"
+
+
+def _default_s3_client() -> Any:
+    import boto3
+
+    return boto3.client("s3")
 
 
 def _jsonl_row_count(path: Path) -> int:

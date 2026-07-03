@@ -253,7 +253,7 @@ Never log these values. Tests should use fake values.
      stores only a refresh token in local `.env` manually. If API auth endpoints are added, keep
      callback validation and state checking explicit.
 
-5. [ ] Add recommender data readers.
+5. [x] Add recommender data readers.
    - Files: `src/music_recommender/recommender/data.py`,
      `src/music_recommender/recommender/catalog.py`, `tests/test_recommender_data.py`
    - Notes: Load local or S3 Parquet for tracks, audio features, lyrics NLP, and catalog-linked
@@ -261,7 +261,7 @@ Never log these values. Tests should use fake values.
      during an API request. Phase 0 only added a local readiness check for required tracks and audio
      feature Parquet outputs; the full recommender reader remains Phase 1 work.
 
-6. [ ] Define recommendation domain models and deterministic scoring.
+6. [x] Define recommendation domain models and deterministic scoring.
    - Files: `src/music_recommender/recommender/models.py`,
      `src/music_recommender/recommender/scoring.py`, `tests/test_recommender_scoring.py`
    - Notes: Implement `mood_fit`, `taste_affinity`, `novelty_bonus`, `popularity_prior`,
@@ -376,6 +376,17 @@ Exit criteria:
 
 - Unit tests rank candidate tracks for a breakup/cheer-up prompt intent.
 - No OpenAI call is required for deterministic scoring tests.
+
+Implementation status on 2026-07-02:
+
+- Added local/S3 dataset readers for Parquet and JSONL recommender inputs.
+- Added a catalog loader that merges extracted tracks, audio features, lyrics NLP, and linked
+  interaction records into `CatalogTrack` objects.
+- Added deterministic recommendation domain models for mood intent, user taste, catalog tracks,
+  score breakdowns, and ranked candidates.
+- Added scoring for mood fit, taste affinity, novelty, popularity, diversity, explicit filtering,
+  blocked artists, and duplicate track handling.
+- Added tests for the breakup/cheer-up prompt scenario without OpenAI or live Spotify calls.
 
 ### Phase 2: Agentic Intent And Tool Orchestration
 

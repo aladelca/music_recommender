@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 AudioFeatureSource = Literal["none", "reccobeats", "spotify"]
 RecommenderDataMode = Literal["local", "s3"]
+RecommenderDataRoot = Path | str
 OutputFileFormat = Literal["jsonl", "parquet"]
 
 
@@ -36,7 +37,7 @@ class Settings:
     lyrics_nlp_batch_size: int
     listenbrainz_dump_path: Path | None
     listenbrainz_user_hash_salt: str
-    recommender_data_root: Path
+    recommender_data_root: RecommenderDataRoot
     recommender_data_mode: RecommenderDataMode
     recommender_demo_user_id: str | None
     aws_secrets_prefix: str | None
@@ -94,6 +95,16 @@ def _get_path(name: str, default: str) -> Path:
     if value is None or not value.strip():
         return Path(default)
     return Path(value).expanduser()
+
+
+def _get_recommender_data_root(name: str, default: str) -> RecommenderDataRoot:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return Path(default)
+    normalized = value.strip()
+    if normalized.startswith("s3://"):
+        return normalized.rstrip("/")
+    return Path(normalized).expanduser()
 
 
 def _get_scopes(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -166,7 +177,7 @@ def load_settings(env_file: Path | str = ".env", *, require_bucket: bool = False
         lyrics_nlp_batch_size=_get_int("LYRICS_NLP_BATCH_SIZE", 8),
         listenbrainz_dump_path=_get_optional_path("LISTENBRAINZ_DUMP_PATH"),
         listenbrainz_user_hash_salt=os.getenv("LISTENBRAINZ_USER_HASH_SALT", ""),
-        recommender_data_root=_get_path("RECOMMENDER_DATA_ROOT", "data/local"),
+        recommender_data_root=_get_recommender_data_root("RECOMMENDER_DATA_ROOT", "data/local"),
         recommender_data_mode=_get_choice("RECOMMENDER_DATA_MODE", "local", {"local", "s3"}),
         recommender_demo_user_id=_get_optional_str("RECOMMENDER_DEMO_USER_ID"),
         aws_secrets_prefix=_get_optional_str("AWS_SECRETS_PREFIX"),

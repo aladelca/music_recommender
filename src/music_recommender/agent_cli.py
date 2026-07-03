@@ -73,11 +73,13 @@ def _recommend(args: argparse.Namespace) -> int:
         catalog=catalog,
         profile=profile,
         intent_parser=_live_intent_parser(args) if args.use_openai_agent else None,
+        agent_model=args.openai_model,
     )
     response = service.recommend(
         prompt=str(args.prompt),
         limit=int(args.limit),
         create_playlist=bool(args.create_playlist),
+        use_agent_orchestrator=bool(args.use_openai_agent),
     )
     print(json.dumps(response.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
     return 0

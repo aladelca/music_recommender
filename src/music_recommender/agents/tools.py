@@ -15,10 +15,13 @@ from music_recommender.recommender.models import (
 from music_recommender.recommender.scoring import rank_recommendations
 
 
-@dataclass(frozen=True)
+@dataclass
 class AgentToolContext:
     catalog: RecommenderCatalog
     profile: UserTasteProfile
+    rank_tool_called: bool = False
+    last_ranked_track_ids: tuple[str, ...] = ()
+    last_ranked_candidates: tuple[RecommendationCandidate, ...] = ()
 
 
 def load_user_profile_payload(context: AgentToolContext) -> JsonDict:
@@ -57,6 +60,9 @@ def rank_recommendations_payload(
         limit=limit,
         max_tracks_per_artist=max_tracks_per_artist,
     )
+    context.rank_tool_called = True
+    context.last_ranked_track_ids = tuple(candidate.track.id for candidate in ranked)
+    context.last_ranked_candidates = tuple(ranked)
     tracks = [_recommendation_to_payload(candidate) for candidate in ranked]
     return {
         "intent": intent.to_dict(),

@@ -148,6 +148,24 @@ access token value:
 uv run music-recommender-demo-readiness refresh-spotify-token
 ```
 
+## Agentic Recommender Demo
+
+Phase 2 adds an API-adjacent local command that takes a natural-language prompt and returns
+catalog-backed recommendations as JSON. It uses deterministic intent parsing by default so local
+demo runs do not require an OpenAI API call.
+
+```bash
+uv run music-recommender-agent recommend \
+  --prompt "I just broke up with my girlfriend and I want songs to cheer me up" \
+  --data-root data/local \
+  --catalog-run-id smoke-reccobeats-parquet \
+  --limit 10
+```
+
+To use the OpenAI Agents SDK for live intent parsing, set `OPENAI_API_KEY` in `.env` and add
+`--use-openai-agent`. The recommendation tracks still come only from the deterministic catalog
+ranking tools.
+
 ## Validation
 
 ```bash

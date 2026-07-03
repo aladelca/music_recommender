@@ -274,7 +274,7 @@ Never log these values. Tests should use fake values.
      store a cache in local JSON during development and DynamoDB in AWS. Respect rate limits and
      handle missing profile data gracefully.
 
-8. [ ] Implement the OpenAI Agents SDK layer.
+8. [x] Implement the OpenAI Agents SDK layer.
    - Files: `src/music_recommender/agents/__init__.py`,
      `src/music_recommender/agents/intent.py`,
      `src/music_recommender/agents/tools.py`,
@@ -284,7 +284,7 @@ Never log these values. Tests should use fake values.
      Ensure tool functions call deterministic services and return typed JSON-compatible results.
      Tests should mock the model/runner or test tools separately so CI does not need OpenAI keys.
 
-9. [ ] Add guardrails and output validation.
+9. [x] Add guardrails and output validation.
    - Files: `src/music_recommender/agents/guardrails.py`,
      `tests/test_agent_guardrails.py`
    - Notes: Validate that final tracks come from the candidate/ranking tool output. Playlist
@@ -398,6 +398,17 @@ Exit criteria:
 
 - A local command/API call takes natural language and returns ranked tracks with structured intent.
 - Tests cover tool output validation and no-song-invention behavior.
+
+Implementation status on 2026-07-03:
+
+- Added `openai-agents` and a new `music_recommender.agents` package with intent parsing,
+  JSON-safe tool payloads, orchestration, and guardrail validation.
+- Added deterministic intent parsing for local demos and an injectable OpenAI Agents SDK parser for
+  live runs.
+- Added `music-recommender-agent recommend`, which loads local/S3 catalog data, accepts a natural
+  language prompt, and returns structured ranked recommendations as JSON.
+- Added tests for agent tools, guardrails, orchestration, and the CLI without requiring live OpenAI
+  or Spotify calls.
 
 ### Phase 3: API-Only Demo
 

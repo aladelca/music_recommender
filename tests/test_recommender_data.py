@@ -172,6 +172,49 @@ def test_load_recommender_catalog_from_run_requires_core_datasets(tmp_path: Path
         load_recommender_catalog_from_run(tmp_path, catalog_run_id="catalog-run")
 
 
+def test_load_recommender_catalog_from_run_supports_s3_medallion_partitions() -> None:
+    fake_s3 = FakeS3Client()
+    fake_s3.add_parquet(
+        "bucket",
+        "silver/tracks/run_id=catalog-run/part-000.parquet",
+        [
+            {
+                "spotify_track_id": "track-1",
+                "track_name": "Cloud Recovery",
+                "artist_names": ["Artist A"],
+                "primary_artist_name": "Artist A",
+                "explicit": False,
+                "popularity": 88,
+                "spotify_url": "https://open.spotify.com/track/track-1",
+            }
+        ],
+    )
+    fake_s3.add_parquet(
+        "bucket",
+        "silver/audio_features/run_id=catalog-run/part-000.parquet",
+        [{"spotify_track_id": "track-1", "valence": 0.93}],
+    )
+    fake_s3.add_parquet(
+        "bucket",
+        "gold/catalog_user_track_interactions/run_id=network-run/part-000.parquet",
+        [{"item_id": "track-1", "implicit_rating": 4.2}],
+    )
+
+    catalog = load_recommender_catalog_from_run(
+        "s3://bucket",
+        catalog_run_id="catalog-run",
+        interaction_run_id="network-run",
+        s3_client=fake_s3,
+    )
+
+    track = catalog.by_track_id["track-1"]
+    assert track.name == "Cloud Recovery"
+    assert track.audio_features is not None
+    assert track.audio_features.valence == 0.93
+    assert track.interaction_count == 1
+    assert track.max_implicit_rating == 4.2
+
+
 def test_read_dataset_records_supports_s3_parquet_and_jsonl() -> None:
     fake_s3 = FakeS3Client()
     fake_s3.add_parquet(

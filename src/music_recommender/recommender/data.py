@@ -175,7 +175,7 @@ def _read_s3_records(location: str, *, s3_client: Any | None) -> list[JsonDict]:
         raise ValueError(f"Invalid S3 dataset location: {location}")
     client = s3_client or _default_s3_client()
     bucket = parsed.netloc
-    prefix = parsed.path.lstrip("/")
+    prefix = _normalize_s3_prefix(parsed.path.lstrip("/"))
     records: list[JsonDict] = []
     for key in _s3_data_keys(client, bucket=bucket, prefix=prefix):
         body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
@@ -210,6 +210,12 @@ def _jsonl_bytes_records(body: bytes) -> list[JsonDict]:
             if isinstance(payload, dict):
                 rows.append(payload)
     return rows
+
+
+def _normalize_s3_prefix(prefix: str) -> str:
+    if not prefix or prefix.endswith("/") or prefix.endswith((".parquet", ".jsonl")):
+        return prefix
+    return f"{prefix}/"
 
 
 def _default_s3_client() -> Any:

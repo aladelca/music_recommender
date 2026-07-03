@@ -166,6 +166,40 @@ To use the OpenAI Agents SDK for live intent parsing, set `OPENAI_API_KEY` in `.
 `--use-openai-agent`. The recommendation tracks still come only from the deterministic catalog
 ranking tools.
 
+## API-Only Demo
+
+Phase 3 exposes the same backend demo through JSON API calls. Set a local catalog run before
+starting the API:
+
+```bash
+RECOMMENDER_CATALOG_RUN_ID=smoke-reccobeats-parquet
+RECOMMENDER_DATA_ROOT=data/local
+RECOMMENDER_DATA_MODE=local
+```
+
+Run the local API:
+
+```bash
+uv run music-recommender-api --host 127.0.0.1 --port 8000 --reload
+```
+
+Request recommendations:
+
+```bash
+bash scripts/demo_recommend.sh
+```
+
+Create a Spotify playlist only after explicitly choosing tracks from a recommendation response:
+
+```bash
+SESSION_ID=<session-id> \
+TRACK_IDS_JSON='["spotify-track-id-1","spotify-track-id-2"]' \
+bash scripts/demo_create_playlist.sh
+```
+
+Profile sync and playlist creation require `SPOTIFY_USER_REFRESH_TOKEN` with the configured user
+scopes. The API stores local demo state under `data/local/api_state/` by default.
+
 ## Validation
 
 ```bash

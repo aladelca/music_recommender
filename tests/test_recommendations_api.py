@@ -255,6 +255,7 @@ def test_demo_api_service_persists_recommendation_session(
     )
     session_path = tmp_path / "sessions.json"
     monkeypatch.setenv("RECOMMENDER_SESSION_STORE_PATH", str(session_path))
+    monkeypatch.setenv("RECOMMENDER_PROFILE_CACHE_PATH", str(tmp_path / "profile.json"))
     service = DemoApiService(settings_loader=lambda: build_settings(tmp_path))
 
     response = service.recommend(

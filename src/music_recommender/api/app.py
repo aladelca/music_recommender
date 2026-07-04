@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hmac
 import os
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from music_recommender import __version__
 from music_recommender.api.errors import register_error_handlers
 from music_recommender.api.models import ConfigPresence, HealthResponse
 from music_recommender.api.routes import feedback, playlists, profile, recommendations
 from music_recommender.api.services import DemoApiService
+
+_API_KEY_EXEMPT_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
 
 
 def create_app(*, load_env: bool = True, service: Any | None = None) -> FastAPI:
@@ -25,6 +29,15 @@ def create_app(*, load_env: bool = True, service: Any | None = None) -> FastAPI:
     )
     api.state.api_service = service or DemoApiService()
     register_error_handlers(api)
+
+    @api.middleware("http")
+    async def require_api_key(request: Request, call_next: Any) -> Any:
+        expected_api_key = os.getenv("RECOMMENDER_API_KEY", "").strip()
+        if expected_api_key and request.url.path not in _API_KEY_EXEMPT_PATHS:
+            provided_api_key = request.headers.get("x-api-key", "")
+            if not hmac.compare_digest(provided_api_key, expected_api_key):
+                return JSONResponse(status_code=401, content={"detail": "Invalid API key."})
+        return await call_next(request)
 
     @api.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
@@ -44,6 +57,7 @@ def create_app(*, load_env: bool = True, service: Any | None = None) -> FastAPI:
 def _config_presence() -> ConfigPresence:
     return ConfigPresence(
         aws_region=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1",
+        api_key_required=_has_value("RECOMMENDER_API_KEY"),
         aws_secrets_prefix_present=_has_value("AWS_SECRETS_PREFIX"),
         music_recommender_bucket_present=_has_value("MUSIC_RECOMMENDER_BUCKET"),
         openai_api_key_present=_has_value("OPENAI_API_KEY"),

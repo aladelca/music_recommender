@@ -11,7 +11,7 @@ from music_recommender.recommender.playlists import JsonPlaylistRecordStore, Pla
 
 def test_playlists_endpoint_creates_playlist_through_service() -> None:
     service = FakeApiService()
-    client = TestClient(create_app(service=service))
+    client = TestClient(create_app(load_env=False, service=service))
 
     response = client.post(
         "/playlists",
@@ -68,6 +68,40 @@ def test_playlist_service_is_idempotent_by_session(tmp_path: Path) -> None:
     assert spotify.added_batches == [["sunny", "dance"]]
 
 
+def test_playlist_service_does_not_create_duplicate_playlist_after_add_failure(
+    tmp_path: Path,
+) -> None:
+    spotify = FakeSpotifyPlaylistClient(fail_add=True)
+    service = PlaylistService(
+        spotify_client=spotify,
+        store=JsonPlaylistRecordStore(tmp_path / "playlists.json"),
+        user_id="12175364859",
+    )
+
+    first = service.create_playlist(
+        session_id="session-1",
+        name="Breakup Recovery",
+        description="Class demo",
+        track_ids=("sunny", "dance"),
+        public=False,
+    )
+    second = service.create_playlist(
+        session_id="session-1",
+        name="Breakup Recovery",
+        description="Class demo",
+        track_ids=("sunny", "dance"),
+        public=False,
+    )
+
+    assert first.idempotent_replay is False
+    assert first.tracks_added == ()
+    assert first.partial_failures == ("spotify add failed",)
+    assert second.idempotent_replay is True
+    assert second.playlist_id == first.playlist_id
+    assert second.partial_failures == ("spotify add failed",)
+    assert spotify.created_count == 1
+
+
 class FakeApiService:
     def __init__(self) -> None:
         self.playlist_request: dict[str, Any] | None = None
@@ -86,9 +120,10 @@ class FakeApiService:
 
 
 class FakeSpotifyPlaylistClient:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_add: bool = False) -> None:
         self.created_count = 0
         self.added_batches: list[list[str]] = []
+        self.fail_add = fail_add
 
     def create_playlist(
         self,
@@ -110,5 +145,7 @@ class FakeSpotifyPlaylistClient:
 
     def add_playlist_items(self, playlist_id: str, track_ids_or_uris: list[str]) -> dict[str, Any]:
         assert playlist_id == "playlist-1"
+        if self.fail_add:
+            raise RuntimeError("spotify add failed")
         self.added_batches.append(track_ids_or_uris)
         return {"snapshot_id": "snapshot-1"}

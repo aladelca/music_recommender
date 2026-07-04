@@ -9,7 +9,7 @@ from music_recommender.api.app import create_app
 
 def test_recommendations_endpoint_returns_ranked_tracks_with_session() -> None:
     service = FakeApiService()
-    client = TestClient(create_app(service=service))
+    client = TestClient(create_app(load_env=False, service=service))
 
     response = client.post(
         "/recommendations",
@@ -43,7 +43,7 @@ def test_recommendations_endpoint_returns_ranked_tracks_with_session() -> None:
 
 
 def test_recommendations_endpoint_validates_limit() -> None:
-    client = TestClient(create_app(service=FakeApiService()))
+    client = TestClient(create_app(load_env=False, service=FakeApiService()))
 
     response = client.post("/recommendations", json={"prompt": "cheer me up", "limit": 0})
 

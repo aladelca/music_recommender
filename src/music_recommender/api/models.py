@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 class ConfigPresence(BaseModel):
     aws_region: str
+    api_key_required: bool
     aws_secrets_prefix_present: bool
     music_recommender_bucket_present: bool
     openai_api_key_present: bool

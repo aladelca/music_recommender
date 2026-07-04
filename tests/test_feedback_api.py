@@ -11,7 +11,7 @@ from music_recommender.recommender.feedback import FeedbackService, JsonFeedback
 
 def test_feedback_endpoint_records_event() -> None:
     service = FakeApiService()
-    client = TestClient(create_app(service=service))
+    client = TestClient(create_app(load_env=False, service=service))
 
     response = client.post(
         "/feedback",

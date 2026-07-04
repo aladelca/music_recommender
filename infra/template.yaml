@@ -13,10 +13,22 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional S3 prefix for extracted recommender data.
+  CatalogRunId:
+    Type: String
+    Default: ""
+    Description: Optional default extracted catalog run ID for deployed recommendation requests.
+  InteractionRunId:
+    Type: String
+    Default: ""
+    Description: Optional default interaction run ID for deployed recommendation requests.
   AwsSecretsPrefix:
     Type: String
     Default: "music-recommender/demo/"
     Description: Secrets Manager name prefix readable by the API Lambda.
+  RuntimeSecretName:
+    Type: String
+    Default: "music-recommender/demo/runtime"
+    Description: Secrets Manager JSON secret with OpenAI, Spotify, and API key values.
   SpotifyDemoUserId:
     Type: String
     Default: "12175364859"
@@ -89,19 +101,34 @@ Resources:
         Variables:
           AWS_SECRETS_PREFIX:
             Ref: AwsSecretsPrefix
+          OPENAI_API_KEY:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:OPENAI_API_KEY}}"
           FEEDBACK_TABLE_NAME:
             Ref: MusicRecommenderFeedbackTable
           MUSIC_RECOMMENDER_BUCKET:
             Ref: DataBucketName
           OPENAI_AGENT_MODEL:
             Ref: OpenAIAgentModel
+          PYTHONPATH: /var/task/src
+          RECOMMENDER_API_KEY:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:RECOMMENDER_API_KEY}}"
+          RECOMMENDER_CATALOG_RUN_ID:
+            Ref: CatalogRunId
           RECOMMENDER_DATA_MODE: s3
           RECOMMENDER_DATA_ROOT:
             Fn::Sub: "s3://${DataBucketName}/${DataPrefix}"
+          RECOMMENDER_INTERACTION_RUN_ID:
+            Ref: InteractionRunId
           SESSIONS_TABLE_NAME:
             Ref: MusicRecommenderSessionsTable
+          SPOTIFY_APP_CLIENT_ID:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_ID}}"
+          SPOTIFY_APP_CLIENT_SECRET:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_SECRET}}"
           SPOTIFY_DEMO_USER_ID:
             Ref: SpotifyDemoUserId
+          SPOTIFY_USER_REFRESH_TOKEN:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_USER_REFRESH_TOKEN}}"
           USERS_TABLE_NAME:
             Ref: MusicRecommenderUsersTable
       Events:

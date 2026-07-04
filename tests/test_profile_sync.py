@@ -11,7 +11,7 @@ from music_recommender.recommender.profile import JsonProfileCache, SpotifyProfi
 
 def test_profile_sync_and_status_routes() -> None:
     service = FakeApiService()
-    client = TestClient(create_app(service=service))
+    client = TestClient(create_app(load_env=False, service=service))
 
     sync_response = client.post("/profile/sync", json={"top_limit": 2, "saved_limit": 2})
     status_response = client.get("/profile")

@@ -18,7 +18,7 @@ def test_health_reports_config_presence_without_secret_values(
     monkeypatch.setenv("RECOMMENDER_DATA_MODE", "s3")
     monkeypatch.setenv("RECOMMENDER_DATA_ROOT", "s3://music-recommender-demo/gold")
 
-    response = TestClient(create_app()).get("/health")
+    response = TestClient(create_app(load_env=False)).get("/health")
 
     assert response.status_code == 200
     body = response.json()
@@ -26,6 +26,7 @@ def test_health_reports_config_presence_without_secret_values(
     assert body["version"] == "0.1.0"
     assert body["config"] == {
         "aws_region": "us-east-1",
+        "api_key_required": False,
         "aws_secrets_prefix_present": True,
         "music_recommender_bucket_present": True,
         "openai_api_key_present": True,
@@ -38,3 +39,31 @@ def test_health_reports_config_presence_without_secret_values(
     assert "sk-test-secret" not in response.text
     assert "spotify-secret" not in response.text
     assert "spotify-refresh" not in response.text
+
+
+def test_configured_api_key_is_required_for_non_health_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RECOMMENDER_API_KEY", "demo-secret")
+    client = TestClient(create_app(load_env=False, service=FakeApiService()))
+
+    assert client.get("/health").status_code == 200
+    unauthorized_response = client.post(
+        "/feedback",
+        json={"session_id": "s", "track_id": "t", "event_type": "like"},
+    )
+    assert unauthorized_response.status_code == 401
+
+    response = client.post(
+        "/feedback",
+        headers={"X-API-Key": "demo-secret"},
+        json={"session_id": "s", "track_id": "t", "event_type": "like"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"event_id": "feedback-1", "status": "recorded"}
+
+
+class FakeApiService:
+    def record_feedback(self, request: object) -> dict[str, str]:
+        return {"event_id": "feedback-1", "status": "recorded"}

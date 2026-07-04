@@ -116,6 +116,7 @@ SPOTIFY_DEMO_USER_ID=12175364859
 SPOTIFY_USER_SCOPES="user-top-read user-library-read playlist-modify-private playlist-modify-public"
 RECOMMENDER_DATA_ROOT=data/local
 RECOMMENDER_DATA_MODE=local
+RECOMMENDER_API_KEY=local-demo-key
 ```
 
 Generate the Spotify authorization URL:

@@ -45,6 +45,7 @@ class PlaylistRecord:
     url: str | None
     track_ids: tuple[str, ...]
     snapshot_id: str | None
+    partial_failures: tuple[str, ...] = ()
 
     def to_result(self, *, idempotent_replay: bool) -> PlaylistCreateResult:
         return PlaylistCreateResult(
@@ -54,6 +55,7 @@ class PlaylistRecord:
             tracks_added=self.track_ids,
             snapshot_id=self.snapshot_id,
             idempotent_replay=idempotent_replay,
+            partial_failures=self.partial_failures,
         )
 
     def to_dict(self) -> JsonDict:
@@ -133,15 +135,16 @@ class PlaylistService:
         try:
             add_result = self.spotify_client.add_playlist_items(playlist_id, list(track_ids))
         except Exception as exc:
-            return PlaylistCreateResult(
+            record = PlaylistRecord(
                 session_id=session_id,
                 playlist_id=playlist_id,
                 url=url,
-                tracks_added=(),
+                track_ids=(),
                 snapshot_id=None,
-                idempotent_replay=False,
                 partial_failures=(str(exc),),
             )
+            self.store.put(record)
+            return record.to_result(idempotent_replay=False)
         record = PlaylistRecord(
             session_id=session_id,
             playlist_id=playlist_id,
@@ -160,6 +163,7 @@ def _playlist_record_from_payload(payload: dict[str, Any]) -> PlaylistRecord:
         url=_optional_str(payload.get("url")),
         track_ids=tuple(str(track_id) for track_id in payload.get("track_ids", [])),
         snapshot_id=_optional_str(payload.get("snapshot_id")),
+        partial_failures=tuple(str(item) for item in payload.get("partial_failures", [])),
     )
 
 

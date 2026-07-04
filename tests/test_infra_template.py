@@ -21,9 +21,17 @@ def test_sam_template_defines_serverless_demo_stack() -> None:
     function = resources["MusicRecommenderApiFunction"]["Properties"]
     assert function["Handler"] == "music_recommender.api.lambda_handler.handler"
     assert function["Runtime"] == "python3.12"
-    assert function["Environment"]["Variables"]["RECOMMENDER_DATA_MODE"] == "s3"
-    assert "MUSIC_RECOMMENDER_BUCKET" in function["Environment"]["Variables"]
-    assert "AWS_SECRETS_PREFIX" in function["Environment"]["Variables"]
+    env = function["Environment"]["Variables"]
+    assert env["PYTHONPATH"] == "/var/task/src"
+    assert env["RECOMMENDER_DATA_MODE"] == "s3"
+    assert "MUSIC_RECOMMENDER_BUCKET" in env
+    assert "AWS_SECRETS_PREFIX" in env
+    assert "RECOMMENDER_API_KEY" in env
+    assert "SPOTIFY_APP_CLIENT_ID" in env
+    assert "SPOTIFY_APP_CLIENT_SECRET" in env
+    assert "SPOTIFY_USER_REFRESH_TOKEN" in env
+    assert "OPENAI_API_KEY" in env
+    assert "secretsmanager" in str(env["SPOTIFY_APP_CLIENT_SECRET"])
 
     policies = function["Policies"]
     policy_text = str(policies)

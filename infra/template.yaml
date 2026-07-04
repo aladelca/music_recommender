@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless deployment foundation for the music recommender class demo.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: "$default"
+  DataBucketName:
+    Type: String
+    Description: S3 bucket containing extracted recommender data.
+  DataPrefix:
+    Type: String
+    Default: ""
+    Description: Optional S3 prefix for extracted recommender data.
+  CatalogRunId:
+    Type: String
+    Default: ""
+    Description: Optional default extracted catalog run ID for deployed recommendation requests.
+  InteractionRunId:
+    Type: String
+    Default: ""
+    Description: Optional default interaction run ID for deployed recommendation requests.
+  AwsSecretsPrefix:
+    Type: String
+    Default: "music-recommender/demo/"
+    Description: Secrets Manager name prefix readable by the API Lambda.
+  RuntimeSecretName:
+    Type: String
+    Default: "music-recommender/demo/runtime"
+    Description: Secrets Manager JSON secret with OpenAI, Spotify, and API key values.
+  SpotifyDemoUserId:
+    Type: String
+    Default: "12175364859"
+  OpenAIAgentModel:
+    Type: String
+    Default: ""
+
+Resources:
+  MusicRecommenderHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName:
+        Ref: StageName
+
+  MusicRecommenderUsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+
+  MusicRecommenderSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+
+  MusicRecommenderFeedbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: event_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+        - AttributeName: event_key
+          KeyType: RANGE
+
+  MusicRecommenderApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${MusicRecommenderApiFunction}"
+      RetentionInDays: 14
+
+  MusicRecommenderApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../
+      Handler: music_recommender.api.lambda_handler.handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          AWS_SECRETS_PREFIX:
+            Ref: AwsSecretsPrefix
+          OPENAI_API_KEY:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:OPENAI_API_KEY}}"
+          FEEDBACK_TABLE_NAME:
+            Ref: MusicRecommenderFeedbackTable
+          MUSIC_RECOMMENDER_BUCKET:
+            Ref: DataBucketName
+          OPENAI_AGENT_MODEL:
+            Ref: OpenAIAgentModel
+          PYTHONPATH: /var/task/src
+          RECOMMENDER_API_KEY:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:RECOMMENDER_API_KEY}}"
+          RECOMMENDER_CATALOG_RUN_ID:
+            Ref: CatalogRunId
+          RECOMMENDER_DATA_MODE: s3
+          RECOMMENDER_DATA_ROOT:
+            Fn::Sub: "s3://${DataBucketName}/${DataPrefix}"
+          RECOMMENDER_INTERACTION_RUN_ID:
+            Ref: InteractionRunId
+          SESSIONS_TABLE_NAME:
+            Ref: MusicRecommenderSessionsTable
+          SPOTIFY_APP_CLIENT_ID:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_ID}}"
+          SPOTIFY_APP_CLIENT_SECRET:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_SECRET}}"
+          SPOTIFY_DEMO_USER_ID:
+            Ref: SpotifyDemoUserId
+          SPOTIFY_USER_REFRESH_TOKEN:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_USER_REFRESH_TOKEN}}"
+          USERS_TABLE_NAME:
+            Ref: MusicRecommenderUsersTable
+      Events:
+        RootRoute:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: MusicRecommenderHttpApi
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: MusicRecommenderHttpApi
+            Path: /{proxy+}
+            Method: ANY
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:DeleteItem
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+              Resource:
+                - Fn::GetAtt:
+                    - MusicRecommenderUsersTable
+                    - Arn
+                - Fn::GetAtt:
+                    - MusicRecommenderSessionsTable
+                    - Arn
+                - Fn::GetAtt:
+                    - MusicRecommenderFeedbackTable
+                    - Arn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                Fn::Sub: "arn:${AWS::Partition}:s3:::${DataBucketName}/${DataPrefix}*"
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource:
+                Fn::Sub: "arn:${AWS::Partition}:s3:::${DataBucketName}"
+              Condition:
+                StringLike:
+                  s3:prefix:
+                    - Fn::Sub: "${DataPrefix}*"
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                Fn::Sub: >-
+                  arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AwsSecretsPrefix}*
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the deployed API Gateway HTTP API.
+    Value:
+      Fn::Sub: "https://${MusicRecommenderHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+  ApiFunctionName:
+    Description: Lambda function name for the API.
+    Value:
+      Ref: MusicRecommenderApiFunction
+  UsersTableName:
+    Description: DynamoDB users table.
+    Value:
+      Ref: MusicRecommenderUsersTable
+  SessionsTableName:
+    Description: DynamoDB sessions table.
+    Value:
+      Ref: MusicRecommenderSessionsTable
+  FeedbackTableName:
+    Description: DynamoDB feedback table.
+    Value:
+      Ref: MusicRecommenderFeedbackTable

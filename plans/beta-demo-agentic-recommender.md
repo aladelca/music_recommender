@@ -229,7 +229,7 @@ Never log these values. Tests should use fake values.
 
 ## Implementation Tasks
 
-1. [ ] Create a high-level backend package skeleton.
+1. [x] Create a high-level backend package skeleton.
    - Files: `src/music_recommender/api/__init__.py`, `src/music_recommender/api/app.py`,
      `src/music_recommender/api/models.py`, `src/music_recommender/api/errors.py`
    - Notes: Add FastAPI as a dependency. Keep route handlers thin and move business logic into
@@ -267,7 +267,7 @@ Never log these values. Tests should use fake values.
    - Notes: Implement `mood_fit`, `taste_affinity`, `novelty_bonus`, `popularity_prior`,
      diversity penalty, explicit filtering, and duplicate artist/track handling.
 
-7. [ ] Implement Spotify profile sync for the demo user.
+7. [x] Implement Spotify profile sync for the demo user.
    - Files: `src/music_recommender/recommender/profile.py`,
      `src/music_recommender/api/routes/profile.py`, `tests/test_profile_sync.py`
    - Notes: Fetch saved tracks/top items through user OAuth, normalize into `UserTasteProfile`, and
@@ -291,38 +291,38 @@ Never log these values. Tests should use fake values.
      creation requires an explicit request flag and should never happen as an accidental side
      effect of a broad prompt.
 
-10. [ ] Implement recommendation API endpoint.
+10. [x] Implement recommendation API endpoint.
     - Files: `src/music_recommender/api/routes/recommendations.py`,
       `src/music_recommender/api/app.py`, `tests/test_recommendations_api.py`
     - Notes: `POST /recommendations` should support read-only recommendation first and optional
       playlist creation later. Return intent, track list, explanations, score breakdowns, and
       session ID.
 
-11. [ ] Implement playlist creation endpoint.
+11. [x] Implement playlist creation endpoint.
     - Files: `src/music_recommender/api/routes/playlists.py`,
       `src/music_recommender/recommender/playlists.py`, `tests/test_playlists_api.py`
     - Notes: Make playlist creation idempotent by storing a session-to-playlist record. If adding
       tracks partially fails, return a partial-failure response instead of hiding the error.
 
-12. [ ] Implement feedback endpoint.
+12. [x] Implement feedback endpoint.
     - Files: `src/music_recommender/api/routes/feedback.py`,
       `src/music_recommender/recommender/feedback.py`, `tests/test_feedback_api.py`
     - Notes: Store feedback locally first, then DynamoDB in the AWS phase. Feedback should influence
       later ranking only after persistence is stable.
 
-13. [ ] Add AWS infrastructure as code.
+13. [x] Add AWS infrastructure as code.
     - Files: `infra/README.md`, `infra/cdk/` or `template.yaml`
     - Notes: Prefer AWS CDK if the class can support it; otherwise use AWS SAM. Define API Gateway,
       Lambda, IAM roles, DynamoDB tables, Secrets Manager secret references, S3 bucket/prefix
       permissions, and CloudWatch log retention.
 
-14. [ ] Add AWS Lambda adapter and deployment entry point.
+14. [x] Add AWS Lambda adapter and deployment entry point.
     - Files: `src/music_recommender/api/lambda_handler.py`, `pyproject.toml`,
       `tests/test_lambda_handler.py`
     - Notes: Use Mangum or Lambda Web Adapter. If package size or cold starts become a problem, add
       an ECS Fargate alternative in `infra/README.md` instead of overcomplicating Lambda.
 
-15. [ ] Add operational scripts for the demo.
+15. [x] Add operational scripts for the demo.
     - Files: `scripts/demo_sync_profile.sh`, `scripts/demo_recommend.sh`,
       `scripts/demo_create_playlist.sh`, `README.md`
     - Notes: Scripts should use `curl` against local or deployed API. Do not embed secrets in
@@ -421,6 +421,19 @@ Exit criteria:
 - `curl` can create a Spotify playlist when explicitly requested.
 - API tests pass without live OpenAI/Spotify calls by using fakes.
 
+Implementation status on 2026-07-03:
+
+- Added a FastAPI backend package with `/health`, `POST /recommendations`, `POST /playlists`,
+  `POST /feedback`, `POST /profile/sync`, and `GET /profile`.
+- Recommendation requests reuse `AgenticRecommendationService` and the existing local/S3
+  recommender catalog readers. Local requests use deterministic intent parsing by default, with
+  optional OpenAI Agents SDK orchestration when explicitly requested.
+- Playlist creation is explicit and idempotent by recommendation session through a local JSON
+  record store. Feedback and profile sync also use local JSON stores for the class demo path.
+- Added `music-recommender-api` and curl scripts for profile sync, recommendation, and playlist
+  creation. Live profile sync and playlist creation still require a valid
+  `SPOTIFY_USER_REFRESH_TOKEN`.
+
 ### Phase 4: AWS Serverless Deployment
 
 - Add infrastructure as code.
@@ -432,6 +445,17 @@ Exit criteria:
 - Deployed API health check succeeds.
 - Deployed recommendation request returns results.
 - Deployed playlist creation works for the authorized demo Spotify profile.
+
+Implementation status on 2026-07-03:
+
+- Started Phase 4 with an AWS SAM template for API Gateway, Lambda, DynamoDB demo tables, scoped S3
+  read access, Secrets Manager prefix access, environment variables, log retention, and stack
+  outputs.
+- Added a Mangum Lambda handler around the FastAPI app and a minimal `/health` endpoint so the
+  deployment foundation can be validated before Phase 3 recommendation and playlist routes land.
+- Added focused tests for the health route, Lambda handler, and SAM template. Live AWS deployment,
+  recommendation requests, and playlist creation remain blocked on the Phase 3 API routes and
+  local/demo credentials.
 
 ### Phase 5: Demo Polish And Evaluation
 

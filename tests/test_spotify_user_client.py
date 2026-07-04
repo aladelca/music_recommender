@@ -146,6 +146,90 @@ def test_user_profile_and_playlist_calls_use_bearer_token() -> None:
     assert add_request.read() == b'{"uris":["spotify:track:track-1","spotify:track:track-2"]}'
 
 
+def test_paginated_user_profile_reads() -> None:
+    requests: list[httpx.Request] = []
+
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "access", "expires_in": 3600},
+            request=request,
+        )
+
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        params = urllib.parse.parse_qs(request.url.query.decode("utf-8"))
+        if request.url.path == "/v1/me/tracks":
+            offset = int(params["offset"][0])
+            saved_items = [
+                {"track": {"id": "saved-1"}},
+                {"track": {"id": "saved-2"}},
+                {"track": {"id": "saved-3"}},
+            ][offset : offset + int(params["limit"][0])]
+            return httpx.Response(200, json={"items": saved_items}, request=request)
+        if request.url.path == "/v1/me/top/tracks":
+            offset = int(params["offset"][0])
+            top_items = [{"id": "top-1"}, {"id": "top-2"}, {"id": "top-3"}][
+                offset : offset + int(params["limit"][0])
+            ]
+            return httpx.Response(200, json={"items": top_items}, request=request)
+        if request.url.path == "/v1/me/playlists":
+            offset = int(params["offset"][0])
+            playlist_items = [{"id": "playlist-1"}, {"id": "playlist-2"}][
+                offset : offset + int(params["limit"][0])
+            ]
+            return httpx.Response(200, json={"items": playlist_items}, request=request)
+        if request.url.path == "/v1/playlists/playlist-1/items":
+            offset = int(params["offset"][0])
+            playlist_track_items = [
+                {"track": {"id": "playlist-track-1"}},
+                {"track": {"id": "playlist-track-2"}},
+            ][offset : offset + int(params["limit"][0])]
+            return httpx.Response(200, json={"items": playlist_track_items}, request=request)
+        if request.url.path == "/v1/me/player/recently-played":
+            return httpx.Response(
+                200,
+                json={"items": [{"track": {"id": "recent-1"}}]},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(auth_handler),
+        api_transport=httpx.MockTransport(api_handler),
+    )
+
+    saved = list(client.iter_saved_tracks(limit_total=3, page_size=2, market="US"))
+    top = list(client.iter_top_items("tracks", limit_total=3, time_range="long_term", page_size=2))
+    playlists = list(client.iter_current_user_playlists(limit_total=2, page_size=1))
+    playlist_items = list(
+        client.iter_playlist_items(
+            "playlist-1",
+            limit_total=2,
+            page_size=1,
+            market="US",
+            fields="items(track(id)),total,next,limit,offset",
+        )
+    )
+    recent = client.get_recently_played(limit=1)
+
+    assert [item["track"]["id"] for item in saved] == ["saved-1", "saved-2", "saved-3"]
+    assert [item["id"] for item in top] == ["top-1", "top-2", "top-3"]
+    assert [item["id"] for item in playlists] == ["playlist-1", "playlist-2"]
+    assert [item["track"]["id"] for item in playlist_items] == [
+        "playlist-track-1",
+        "playlist-track-2",
+    ]
+    assert recent["items"][0]["track"]["id"] == "recent-1"
+    assert all(request.headers["authorization"] == "Bearer access" for request in requests)
+    assert len([request for request in requests if request.url.path == "/v1/me/tracks"]) == 2
+    playlist_items_request = [
+        request for request in requests if request.url.path == "/v1/playlists/playlist-1/items"
+    ][0]
+    playlist_items_params = urllib.parse.parse_qs(playlist_items_request.url.query.decode("utf-8"))
+    assert playlist_items_params["fields"] == ["items(track(id)),total,next,limit,offset"]
+
+
 def test_scope_and_uri_helpers() -> None:
     assert missing_required_scopes(
         "user-top-read playlist-modify-private",

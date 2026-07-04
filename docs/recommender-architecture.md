@@ -137,6 +137,10 @@ Candidate sources:
 - Collaborative candidates from ListenBrainz interactions, especially for open educational training.
 - Spotify search/catalog lookups for availability and display metadata.
 
+For the beta demo, the live Spotify profile path should start with saved tracks and top items, then
+add selected user playlists or favorite playlists as candidate and taste-affinity signals. Playlist
+reads should not imply playlist writes; playlist creation remains a separate explicit action.
+
 Ranking score:
 
 ```text
@@ -179,7 +183,8 @@ Add an API service that serves the product experience.
 Suggested modules:
 
 - `auth`: Spotify OAuth and token refresh.
-- `profiles`: sync and normalize user taste signals.
+- `profiles`: sync and normalize user taste signals from saved tracks, top items, selected
+  playlists, and optional recently played tracks.
 - `intent`: LLM-backed prompt-to-intent parser with schema validation.
 - `retrieval`: candidate generation from catalog, features, and user profile.
 - `ranking`: scoring, filtering, and diversification.

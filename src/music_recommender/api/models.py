@@ -4,6 +4,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+TopTimeRange = Literal["short_term", "medium_term", "long_term"]
+
+
+def _default_top_time_ranges() -> list[TopTimeRange]:
+    return ["medium_term"]
+
 
 class ConfigPresence(BaseModel):
     aws_region: str
@@ -59,4 +65,11 @@ class FeedbackRequest(BaseModel):
 class ProfileSyncRequest(BaseModel):
     top_limit: int = Field(default=20, ge=1, le=50)
     saved_limit: int = Field(default=20, ge=1, le=50)
+    top_time_ranges: list[TopTimeRange] = Field(default_factory=_default_top_time_ranges)
+    include_playlists: bool = True
+    playlist_limit: int = Field(default=10, ge=0, le=50)
+    playlist_track_limit: int = Field(default=50, ge=0, le=500)
+    playlist_ids: list[str] = Field(default_factory=list)
+    include_recently_played: bool = False
+    recently_played_limit: int = Field(default=20, ge=1, le=50)
     market: str | None = None

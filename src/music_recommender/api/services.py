@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from music_recommender.agents.intent import parse_intent_with_agent
 from music_recommender.agents.orchestrator import AgenticRecommendationService
@@ -17,10 +18,11 @@ from music_recommender.config import Settings, load_settings
 from music_recommender.models import JsonDict
 from music_recommender.recommender.catalog import load_recommender_catalog_from_run
 from music_recommender.recommender.feedback import FeedbackService, JsonFeedbackStore
-from music_recommender.recommender.models import UserTasteProfile
+from music_recommender.recommender.models import CatalogTrack, RecommenderCatalog, UserTasteProfile
 from music_recommender.recommender.playlists import JsonPlaylistRecordStore, PlaylistService
 from music_recommender.recommender.profile import (
     JsonProfileCache,
+    ProfileSnapshot,
     SpotifyProfileSyncService,
 )
 from music_recommender.sources.spotify_user import SpotifyUserClient
@@ -50,7 +52,9 @@ class DemoApiService:
             interaction_run_id=interaction_run_id,
             data_mode=settings.recommender_data_mode,
         )
-        profile = self._request_profile(settings, request)
+        cached_profile = JsonProfileCache(_state_path("RECOMMENDER_PROFILE_CACHE_PATH")).load()
+        catalog = _catalog_with_spotify_candidates(catalog, cached_profile)
+        profile = self._request_profile(settings, request, cached_profile=cached_profile)
         service = AgenticRecommendationService(
             catalog=catalog,
             profile=profile,
@@ -101,6 +105,13 @@ class DemoApiService:
         return sync_service.sync_profile(
             top_limit=request.top_limit,
             saved_limit=request.saved_limit,
+            top_time_ranges=tuple(request.top_time_ranges),
+            include_playlists=request.include_playlists,
+            playlist_limit=request.playlist_limit,
+            playlist_track_limit=request.playlist_track_limit,
+            playlist_ids=tuple(request.playlist_ids),
+            include_recently_played=request.include_recently_played,
+            recently_played_limit=request.recently_played_limit,
             market=request.market,
         ).to_dict()
 
@@ -111,7 +122,12 @@ class DemoApiService:
         return {
             "present": True,
             "profile": _profile_payload(snapshot.profile),
+            "source": snapshot.source,
+            "source_counts": snapshot.source_counts,
+            "playlist_sources": list(snapshot.playlist_sources),
             "synced_at": snapshot.synced_at,
+            "time_ranges": list(snapshot.time_ranges),
+            "missing_optional_scopes": list(snapshot.missing_optional_scopes),
         }
 
     def _settings(self) -> Settings:
@@ -124,11 +140,12 @@ class DemoApiService:
         self,
         settings: Settings,
         request: RecommendationRequest,
+        *,
+        cached_profile: ProfileSnapshot | None = None,
     ) -> UserTasteProfile:
-        cached = JsonProfileCache(_state_path("RECOMMENDER_PROFILE_CACHE_PATH")).load()
         base_profile = (
-            cached.profile
-            if cached is not None
+            cached_profile.profile
+            if cached_profile is not None
             else UserTasteProfile(
                 user_id=(
                     request.demo_user_id
@@ -185,11 +202,79 @@ def _merge_tuple(existing: tuple[str, ...], extra: list[str]) -> tuple[str, ...]
     return tuple(merged)
 
 
+def _catalog_with_spotify_candidates(
+    catalog: RecommenderCatalog,
+    cached_profile: ProfileSnapshot | None,
+) -> RecommenderCatalog:
+    if cached_profile is None or not cached_profile.spotify_track_candidates:
+        return catalog
+    seen_track_ids = set(catalog.by_track_id)
+    extra_tracks: list[CatalogTrack] = []
+    for candidate in cached_profile.spotify_track_candidates:
+        track = _spotify_candidate_to_catalog_track(candidate)
+        if track is None or track.id in seen_track_ids:
+            continue
+        seen_track_ids.add(track.id)
+        extra_tracks.append(track)
+    if not extra_tracks:
+        return catalog
+    return RecommenderCatalog(tracks=(*catalog.tracks, *extra_tracks))
+
+
+def _spotify_candidate_to_catalog_track(candidate: JsonDict) -> CatalogTrack | None:
+    track_id = _optional_str(candidate.get("id"))
+    if track_id is None:
+        return None
+    artist_names = _string_tuple(candidate.get("artist_names"))
+    primary_artist_name = _optional_str(candidate.get("primary_artist_name")) or (
+        artist_names[0] if artist_names else None
+    )
+    return CatalogTrack(
+        id=track_id,
+        name=_optional_str(candidate.get("name")) or track_id,
+        artist_names=artist_names,
+        primary_artist_name=primary_artist_name,
+        explicit=bool(candidate.get("explicit") or False),
+        popularity=_optional_int(candidate.get("popularity")),
+        spotify_url=_optional_str(candidate.get("spotify_url")),
+    )
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value if item is not None)
+    return (str(value),)
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _profile_payload(profile: UserTasteProfile) -> JsonDict:
-    return {
+    payload: JsonDict = {
         "user_id": profile.user_id,
         "liked_track_ids": list(profile.liked_track_ids),
         "known_track_ids": list(profile.known_track_ids),
         "liked_artist_names": list(profile.liked_artist_names),
         "blocked_artist_names": list(profile.blocked_artist_names),
     }
+    if profile.artist_affinity is not None:
+        payload["artist_affinity"] = profile.artist_affinity
+    if profile.track_affinity is not None:
+        payload["track_affinity"] = profile.track_affinity
+    return payload

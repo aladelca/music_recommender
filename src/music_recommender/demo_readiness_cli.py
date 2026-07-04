@@ -6,16 +6,58 @@ import os
 import secrets
 import sys
 from pathlib import Path
+from typing import Any, Protocol
 
 from dotenv import load_dotenv
 
 from music_recommender.config import Settings, load_settings
+from music_recommender.models import JsonDict
 from music_recommender.recommender.data import check_local_recommender_data
 from music_recommender.sources.spotify_user import (
     SpotifyUserClient,
+    TopItemType,
+    TopTimeRange,
     build_authorization_url,
     missing_required_scopes,
 )
+
+
+class LiveProfileCheckClient(Protocol):
+    def refresh_access_token(self, *, required_scopes: tuple[str, ...] = ()) -> Any: ...
+
+    def get_current_user_profile(self) -> JsonDict: ...
+
+    def get_saved_tracks(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        market: str | None = None,
+    ) -> JsonDict: ...
+
+    def get_top_items(
+        self,
+        item_type: TopItemType,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        time_range: TopTimeRange = "medium_term",
+    ) -> JsonDict: ...
+
+    def get_current_user_playlists(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> JsonDict: ...
+
+    def get_recently_played(
+        self,
+        *,
+        limit: int = 20,
+        before: int | None = None,
+        after: int | None = None,
+    ) -> JsonDict: ...
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
         "refresh-spotify-token",
         help="Refresh the Spotify user token and validate configured scopes.",
     )
+
+    check_live_profile = subparsers.add_parser(
+        "check-live-profile",
+        help="Validate Spotify profile scopes and fetch redacted live profile sample counts.",
+    )
+    check_live_profile.add_argument("--include-playlists", action="store_true")
+    check_live_profile.add_argument("--include-recently-played", action="store_true")
+    check_live_profile.add_argument("--sample-limit", type=int, default=5)
     return parser
 
 
@@ -60,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         return _exchange_code(args)
     if command == "refresh-spotify-token":
         return _refresh_spotify_token()
+    if command == "check-live-profile":
+        return _check_live_profile(args)
     parser.error(f"Unknown command: {command}")
 
 
@@ -132,6 +184,83 @@ def _refresh_spotify_token() -> int:
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def _check_live_profile(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    client = _build_user_client(settings)
+    try:
+        payload = _live_profile_check_payload(
+            settings,
+            client=client,
+            include_playlists=bool(args.include_playlists),
+            include_recently_played=bool(args.include_recently_played),
+            sample_limit=int(args.sample_limit),
+        )
+    finally:
+        client.close()
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _live_profile_check_payload(
+    settings: Settings,
+    *,
+    client: LiveProfileCheckClient,
+    include_playlists: bool,
+    include_recently_played: bool,
+    sample_limit: int,
+) -> JsonDict:
+    bounded_sample_limit = max(1, min(sample_limit, 50))
+    required_scopes = _profile_required_scopes(
+        settings,
+        include_playlists=include_playlists,
+        include_recently_played=include_recently_played,
+    )
+    client.refresh_access_token(required_scopes=required_scopes)
+    current_user = client.get_current_user_profile()
+    payload: JsonDict = {
+        "account_id_present": bool(current_user.get("account_id")),
+        "missing_required_scopes": [],
+        "saved_track_sample_count": _item_count(
+            client.get_saved_tracks(limit=bounded_sample_limit, market=settings.spotify_market)
+        ),
+        "top_artist_sample_count": _item_count(
+            client.get_top_items("artists", limit=bounded_sample_limit)
+        ),
+        "top_track_sample_count": _item_count(
+            client.get_top_items("tracks", limit=bounded_sample_limit)
+        ),
+        "user_id": str(current_user.get("id", "")),
+    }
+    if include_playlists:
+        payload["playlist_sample_count"] = _item_count(
+            client.get_current_user_playlists(limit=bounded_sample_limit)
+        )
+    if include_recently_played:
+        payload["recent_track_sample_count"] = _item_count(
+            client.get_recently_played(limit=bounded_sample_limit)
+        )
+    return payload
+
+
+def _profile_required_scopes(
+    _settings: Settings,
+    *,
+    include_playlists: bool,
+    include_recently_played: bool,
+) -> tuple[str, ...]:
+    scopes = {"user-library-read", "user-top-read"}
+    if include_playlists:
+        scopes.add("playlist-read-private")
+    if include_recently_played:
+        scopes.add("user-read-recently-played")
+    return tuple(sorted(scopes))
+
+
+def _item_count(payload: JsonDict) -> int:
+    items = payload.get("items", [])
+    return len(items) if isinstance(items, list) else 0
 
 
 def _build_user_client(settings: Settings) -> SpotifyUserClient:

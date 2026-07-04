@@ -155,6 +155,7 @@ def load_settings(env_file: Path | str = ".env", *, require_bucket: bool = False
             (
                 "user-top-read",
                 "user-library-read",
+                "playlist-read-private",
                 "playlist-modify-private",
                 "playlist-modify-public",
             ),

@@ -101,6 +101,13 @@ class DemoApiService:
         return sync_service.sync_profile(
             top_limit=request.top_limit,
             saved_limit=request.saved_limit,
+            top_time_ranges=tuple(request.top_time_ranges),
+            include_playlists=request.include_playlists,
+            playlist_limit=request.playlist_limit,
+            playlist_track_limit=request.playlist_track_limit,
+            playlist_ids=tuple(request.playlist_ids),
+            include_recently_played=request.include_recently_played,
+            recently_played_limit=request.recently_played_limit,
             market=request.market,
         ).to_dict()
 
@@ -111,7 +118,12 @@ class DemoApiService:
         return {
             "present": True,
             "profile": _profile_payload(snapshot.profile),
+            "source": snapshot.source,
+            "source_counts": snapshot.source_counts,
+            "playlist_sources": list(snapshot.playlist_sources),
             "synced_at": snapshot.synced_at,
+            "time_ranges": list(snapshot.time_ranges),
+            "missing_optional_scopes": list(snapshot.missing_optional_scopes),
         }
 
     def _settings(self) -> Settings:
@@ -186,10 +198,15 @@ def _merge_tuple(existing: tuple[str, ...], extra: list[str]) -> tuple[str, ...]
 
 
 def _profile_payload(profile: UserTasteProfile) -> JsonDict:
-    return {
+    payload: JsonDict = {
         "user_id": profile.user_id,
         "liked_track_ids": list(profile.liked_track_ids),
         "known_track_ids": list(profile.known_track_ids),
         "liked_artist_names": list(profile.liked_artist_names),
         "blocked_artist_names": list(profile.blocked_artist_names),
     }
+    if profile.artist_affinity is not None:
+        payload["artist_affinity"] = profile.artist_affinity
+    if profile.track_affinity is not None:
+        payload["track_affinity"] = profile.track_affinity
+    return payload

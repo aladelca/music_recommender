@@ -113,7 +113,7 @@ OPENAI_API_KEY=...
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/spotify/callback
 SPOTIFY_USER_REFRESH_TOKEN=...
 SPOTIFY_DEMO_USER_ID=12175364859
-SPOTIFY_USER_SCOPES="user-top-read user-library-read playlist-modify-private playlist-modify-public"
+SPOTIFY_USER_SCOPES="user-top-read user-library-read playlist-read-private playlist-modify-private playlist-modify-public"
 RECOMMENDER_DATA_ROOT=data/local
 RECOMMENDER_DATA_MODE=local
 RECOMMENDER_API_KEY=local-demo-key
@@ -149,6 +149,13 @@ access token value:
 uv run music-recommender-demo-readiness refresh-spotify-token
 ```
 
+Validate that the token can read live profile inputs with redacted sample counts. Use
+`--include-playlists` when favorite/private playlist tracks should enrich the profile:
+
+```bash
+uv run music-recommender-demo-readiness check-live-profile --include-playlists
+```
+
 ## Agentic Recommender Demo
 
 Phase 2 adds an API-adjacent local command that takes a natural-language prompt and returns
@@ -182,6 +189,13 @@ Run the local API:
 
 ```bash
 uv run music-recommender-api --host 127.0.0.1 --port 8000 --reload
+```
+
+Sync the live Spotify profile first when you want recommendations to use saved tracks, top
+tracks/artists, and selected playlist signals:
+
+```bash
+bash scripts/demo_sync_profile.sh
 ```
 
 Request recommendations:

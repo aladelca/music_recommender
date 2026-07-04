@@ -11,6 +11,11 @@ curl -sS -X POST "${API_URL}/profile/sync" \
   "${API_KEY_ARGS[@]}" \
   -H 'Content-Type: application/json' \
   -d '{
+    "top_time_ranges": ["short_term", "medium_term", "long_term"],
     "top_limit": 20,
-    "saved_limit": 20
+    "saved_limit": 50,
+    "include_playlists": true,
+    "playlist_limit": 10,
+    "playlist_track_limit": 100,
+    "include_recently_played": false
   }'

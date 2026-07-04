@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import time
 import urllib.parse
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -156,6 +157,110 @@ class SpotifyUserClient:
             params["market"] = market
         return self._get("/me/tracks", params=params)
 
+    def iter_saved_tracks(
+        self,
+        *,
+        limit_total: int,
+        page_size: int = 50,
+        market: str | None = None,
+    ) -> Iterator[JsonDict]:
+        params: dict[str, str | int] = {}
+        if market:
+            params["market"] = market
+        yield from self._iter_paged_items(
+            "/me/tracks",
+            limit_total=limit_total,
+            page_size=page_size,
+            params=params,
+        )
+
+    def iter_top_items(
+        self,
+        item_type: TopItemType,
+        *,
+        limit_total: int,
+        time_range: TopTimeRange = "medium_term",
+        page_size: int = 50,
+    ) -> Iterator[JsonDict]:
+        yield from self._iter_paged_items(
+            f"/me/top/{item_type}",
+            limit_total=limit_total,
+            page_size=page_size,
+            params={"time_range": time_range},
+        )
+
+    def get_current_user_playlists(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> JsonDict:
+        return self._get("/me/playlists", params={"limit": limit, "offset": offset})
+
+    def iter_current_user_playlists(
+        self,
+        *,
+        limit_total: int,
+        page_size: int = 50,
+    ) -> Iterator[JsonDict]:
+        yield from self._iter_paged_items(
+            "/me/playlists",
+            limit_total=limit_total,
+            page_size=page_size,
+            params={},
+        )
+
+    def get_playlist_items(
+        self,
+        playlist_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        market: str | None = None,
+        fields: str | None = None,
+    ) -> JsonDict:
+        params: dict[str, str | int] = {"limit": limit, "offset": offset}
+        if market:
+            params["market"] = market
+        if fields:
+            params["fields"] = fields
+        return self._get(f"/playlists/{playlist_id}/items", params=params)
+
+    def iter_playlist_items(
+        self,
+        playlist_id: str,
+        *,
+        limit_total: int,
+        page_size: int = 50,
+        market: str | None = None,
+        fields: str | None = None,
+    ) -> Iterator[JsonDict]:
+        params: dict[str, str | int] = {}
+        if market:
+            params["market"] = market
+        if fields:
+            params["fields"] = fields
+        yield from self._iter_paged_items(
+            f"/playlists/{playlist_id}/items",
+            limit_total=limit_total,
+            page_size=page_size,
+            params=params,
+        )
+
+    def get_recently_played(
+        self,
+        *,
+        limit: int = 20,
+        before: int | None = None,
+        after: int | None = None,
+    ) -> JsonDict:
+        params: dict[str, int] = {"limit": limit}
+        if before is not None:
+            params["before"] = before
+        if after is not None:
+            params["after"] = after
+        return self._get("/me/player/recently-played", params=params)
+
     def create_playlist(
         self,
         user_id: str,
@@ -226,6 +331,39 @@ class SpotifyUserClient:
         )
         return _json_object(response.json(), path)
 
+    def _iter_paged_items(
+        self,
+        path: str,
+        *,
+        limit_total: int,
+        page_size: int,
+        params: dict[str, str | int],
+    ) -> Iterator[JsonDict]:
+        if limit_total <= 0:
+            return
+        offset = 0
+        emitted = 0
+        bounded_page_size = _bounded_page_size(page_size)
+        while emitted < limit_total:
+            request_limit = min(bounded_page_size, limit_total - emitted)
+            page_params = {**params, "limit": request_limit, "offset": offset}
+            payload = self._get(path, params=page_params)
+            items = payload.get("items", [])
+            if not isinstance(items, list) or not items:
+                return
+            yielded_this_page = 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                yield item
+                emitted += 1
+                yielded_this_page += 1
+                if emitted >= limit_total:
+                    return
+            if yielded_this_page == 0 or len(items) < request_limit:
+                return
+            offset += len(items)
+
 
 def _json_object(payload: Any, path: str) -> JsonDict:
     if not isinstance(payload, dict):
@@ -236,6 +374,12 @@ def _json_object(payload: Any, path: str) -> JsonDict:
 def _basic_auth_value(client_id: str, client_secret: str) -> str:
     credentials = f"{client_id}:{client_secret}".encode()
     return base64.b64encode(credentials).decode("ascii")
+
+
+def _bounded_page_size(page_size: int) -> int:
+    if page_size < 1:
+        raise ValueError("page_size must be at least 1.")
+    return min(page_size, 50)
 
 
 def _optional_str(value: Any) -> str | None:

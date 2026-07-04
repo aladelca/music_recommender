@@ -21,6 +21,7 @@ def test_load_settings_includes_demo_readiness_defaults(monkeypatch: pytest.Monk
     assert settings.spotify_user_scopes == (
         "user-top-read",
         "user-library-read",
+        "playlist-read-private",
         "playlist-modify-private",
         "playlist-modify-public",
     )

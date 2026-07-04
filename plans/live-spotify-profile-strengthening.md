@@ -148,7 +148,7 @@ API-only recommendation flow.
 
 ## Implementation Tasks
 
-1. [ ] Add paginated Spotify user and playlist read helpers.
+1. [x] Add paginated Spotify user and playlist read helpers.
    - Files: `src/music_recommender/sources/spotify_user.py`,
      `tests/test_spotify_user_client.py`
    - Notes: Keep current one-shot methods. Add helper methods that request pages with Spotify's
@@ -156,7 +156,7 @@ API-only recommendation flow.
      bearer-token behavior. Include current-user playlist reads and playlist item reads. Add
      optional `get_recently_played` only behind explicit scope support.
 
-2. [ ] Strengthen profile sync normalization.
+2. [x] Strengthen profile sync normalization.
    - Files: `src/music_recommender/recommender/profile.py`,
      `tests/test_profile_sync.py`
    - Notes: Build profile signals from multiple pages, time ranges, and selected playlists. Use
@@ -165,14 +165,14 @@ API-only recommendation flow.
      and optionally recent plays as known-track or light affinity. Deduplicate while preserving
      strongest signal. Avoid storing raw full Spotify payloads.
 
-3. [ ] Extend profile snapshot metadata without breaking old caches.
+3. [x] Extend profile snapshot metadata without breaking old caches.
    - Files: `src/music_recommender/recommender/profile.py`,
      `tests/test_profile_sync.py`
    - Notes: Add source counts, time ranges, playlist source summaries, optional stable account ID,
      and optional Spotify user ID. Ensure old JSON cache payloads still load. Do not store access
      tokens, refresh tokens, or email.
 
-4. [ ] Extend the profile sync API request/response contract.
+4. [x] Extend the profile sync API request/response contract.
    - Files: `src/music_recommender/api/models.py`,
      `src/music_recommender/api/services.py`,
      `src/music_recommender/api/routes/profile.py`,
@@ -181,7 +181,7 @@ API-only recommendation flow.
      recent-play inclusion. Keep existing `top_limit`, `saved_limit`, and `market` valid. Return
      profile and metadata that make it obvious what Spotify sources were used.
 
-5. [ ] Make live profile readiness checks more explicit.
+5. [x] Make live profile readiness checks more explicit.
    - Files: `src/music_recommender/demo_readiness_cli.py`,
      `tests/test_*` as appropriate
    - Notes: Add a readiness command or extend `refresh-spotify-token` so it can validate the required
@@ -189,7 +189,7 @@ API-only recommendation flow.
      `/me/top/tracks`, and `/me/playlists` when playlist reads are enabled. Keep token values
      redacted.
 
-6. [ ] Update demo scripts and docs for the live profile flow.
+6. [x] Update demo scripts and docs for the live profile flow.
    - Files: `scripts/demo_sync_profile.sh`, `scripts/demo_recommend.sh`, `README.md`,
      `docs/recommender-architecture.md`
    - Notes: Document the sequence: generate OAuth URL, exchange code, save refresh token locally,
@@ -197,14 +197,14 @@ API-only recommendation flow.
      recommendations, create playlist. Make clear that DynamoDB is not required for this step.
      Document `playlist-read-private` when private or followed playlists should enrich the profile.
 
-7. [ ] Add a focused live-profile integration test path with fakes.
+7. [x] Add a focused live-profile integration test path with fakes.
    - Files: `tests/test_profile_sync.py`, `tests/test_recommendations_api.py`,
      possibly `tests/test_spotify_user_client.py`
    - Notes: Cover `sync_profile` with multi-page saved tracks, multiple top time ranges, playlist
      tracks, duplicated tracks/artists, empty saved library, inaccessible playlists, and
      recommendation calls using cached profile affinities.
 
-8. [ ] Update the master plan status.
+8. [x] Update the master plan status.
    - Files: `plans/beta-demo-agentic-recommender.md`
    - Notes: Add a Phase 4 note that the immediate next step is strengthening live Spotify profile
      sync and local cache integration before considering DynamoDB-backed runtime state.

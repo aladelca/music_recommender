@@ -110,7 +110,7 @@ Required demo variables:
 
 ```bash
 OPENAI_API_KEY=...
-SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/spotify/callback
+SPOTIFY_REDIRECT_URI=https://www.google.com/
 SPOTIFY_USER_REFRESH_TOKEN=...
 SPOTIFY_DEMO_USER_ID=12175364859
 SPOTIFY_USER_SCOPES="user-top-read user-library-read playlist-read-private playlist-modify-private playlist-modify-public"
@@ -218,6 +218,9 @@ rejects unknown sessions and tracks that were not recommended for that session.
 
 Profile sync and playlist creation require `SPOTIFY_USER_REFRESH_TOKEN` with the configured user
 scopes. The API stores local demo state under `data/local/api_state/` by default.
+
+For the full local testing sequence, including required `.env` values, readiness checks, API calls,
+feedback, and Spotify playlist creation, see [docs/local-demo-runbook.md](docs/local-demo-runbook.md).
 
 ## Validation
 

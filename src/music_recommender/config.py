@@ -146,7 +146,7 @@ def load_settings(env_file: Path | str = ".env", *, require_bucket: bool = False
         spotify_market=os.getenv("SPOTIFY_MARKET", "US"),
         spotify_redirect_uri=os.getenv(
             "SPOTIFY_REDIRECT_URI",
-            "http://127.0.0.1:8080/spotify/callback",
+            "https://www.google.com/",
         ),
         spotify_user_refresh_token=_get_optional_str("SPOTIFY_USER_REFRESH_TOKEN"),
         spotify_demo_user_id=os.getenv("SPOTIFY_DEMO_USER_ID", "12175364859"),

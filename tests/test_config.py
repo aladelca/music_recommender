@@ -10,12 +10,19 @@ from music_recommender.config import load_settings
 def test_load_settings_includes_demo_readiness_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SPOTIFY_APP_CLIENT_ID", "client")
     monkeypatch.setenv("SPOTIFY_APP_CLIENT_SECRET", "secret")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_AGENT_MODEL", raising=False)
+    monkeypatch.delenv("SPOTIFY_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("SPOTIFY_USER_REFRESH_TOKEN", raising=False)
+    monkeypatch.delenv("RECOMMENDER_DATA_ROOT", raising=False)
+    monkeypatch.delenv("RECOMMENDER_DATA_MODE", raising=False)
+    monkeypatch.delenv("RECOMMENDER_DEMO_USER_ID", raising=False)
 
     settings = load_settings(env_file=Path("does-not-exist.env"))
 
     assert settings.openai_api_key is None
     assert settings.openai_agent_model is None
-    assert settings.spotify_redirect_uri == "http://127.0.0.1:8080/spotify/callback"
+    assert settings.spotify_redirect_uri == "https://www.google.com/"
     assert settings.spotify_user_refresh_token is None
     assert settings.spotify_demo_user_id == "12175364859"
     assert settings.spotify_user_scopes == (

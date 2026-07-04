@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from music_recommender.api.app import create_app
 from music_recommender.recommender.profile import JsonProfileCache, SpotifyProfileSyncService
+from music_recommender.sources.http import ApiError
 
 
 def test_profile_sync_and_status_routes() -> None:
@@ -135,8 +136,6 @@ def test_profile_sync_service_enriches_profile_with_live_spotify_sources(
         "Third Artist",
         "Top Artist",
         "Long Artist",
-        "Playlist Artist",
-        "Recent Artist",
     )
     assert snapshot.profile.track_affinity == {
         "saved-1": 1.0,
@@ -156,6 +155,110 @@ def test_profile_sync_service_enriches_profile_with_live_spotify_sources(
         "Playlist Artist": 0.6,
         "Recent Artist": 0.3,
     }
+    assert snapshot.spotify_track_candidates == (
+        {
+            "id": "saved-1",
+            "name": "saved-1",
+            "artist_names": ["Saved Artist"],
+            "primary_artist_name": "Saved Artist",
+            "explicit": False,
+            "popularity": None,
+            "spotify_url": None,
+        },
+        {
+            "id": "saved-2",
+            "name": "saved-2",
+            "artist_names": ["Second Artist"],
+            "primary_artist_name": "Second Artist",
+            "explicit": False,
+            "popularity": None,
+            "spotify_url": None,
+        },
+        {
+            "id": "saved-3",
+            "name": "saved-3",
+            "artist_names": ["Third Artist"],
+            "primary_artist_name": "Third Artist",
+            "explicit": False,
+            "popularity": None,
+            "spotify_url": None,
+        },
+        {
+            "id": "top-short",
+            "name": "top-short",
+            "artist_names": ["Top Artist"],
+            "primary_artist_name": "Top Artist",
+            "explicit": False,
+            "popularity": None,
+            "spotify_url": None,
+        },
+        {
+            "id": "top-long",
+            "name": "top-long",
+            "artist_names": ["Long Artist"],
+            "primary_artist_name": "Long Artist",
+            "explicit": False,
+            "popularity": None,
+            "spotify_url": None,
+        },
+        {
+            "id": "playlist-boost",
+            "name": "playlist-boost",
+            "artist_names": ["Playlist Artist"],
+            "primary_artist_name": "Playlist Artist",
+            "explicit": False,
+            "popularity": None,
+            "spotify_url": None,
+        },
+        {
+            "id": "recent-1",
+            "name": "recent-1",
+            "artist_names": ["Recent Artist"],
+            "primary_artist_name": "Recent Artist",
+            "explicit": False,
+            "popularity": None,
+            "spotify_url": None,
+        },
+    )
+
+
+def test_profile_sync_service_skips_inaccessible_playlists_and_continues(
+    tmp_path: Path,
+) -> None:
+    service = SpotifyProfileSyncService(
+        spotify_client=PartiallyInaccessiblePlaylistClient(),
+        cache=JsonProfileCache(tmp_path / "profile.json"),
+        required_user_id="12175364859",
+    )
+
+    snapshot = service.sync_profile(
+        top_limit=1,
+        saved_limit=1,
+        include_playlists=True,
+        playlist_limit=2,
+        playlist_track_limit=2,
+    )
+
+    assert snapshot.source_counts["playlists"] == 2
+    assert snapshot.source_counts["playlist_tracks"] == 1
+    assert snapshot.missing_optional_scopes == ()
+    assert snapshot.playlist_sources == (
+        {
+            "id": "blocked",
+            "name": "Blocked Playlist",
+            "owner_id": "other",
+            "tracks_read": 0,
+            "status": "skipped_inaccessible",
+        },
+        {
+            "id": "readable",
+            "name": "Readable Playlist",
+            "owner_id": "12175364859",
+            "tracks_read": 1,
+        },
+    )
+    assert snapshot.profile.known_track_ids == ("saved-1", "top-1", "readable-track")
+    assert snapshot.profile.liked_artist_names == ("Saved Artist", "Top Artist")
 
 
 def test_profile_cache_loads_old_snapshot_shape(tmp_path: Path) -> None:
@@ -403,3 +506,64 @@ class RichFakeSpotifyProfileClient:
     ) -> dict[str, Any]:
         assert limit == 1
         return {"items": [{"track": {"id": "recent-1", "artists": [{"name": "Recent Artist"}]}}]}
+
+
+class PartiallyInaccessiblePlaylistClient:
+    def get_current_user_profile(self) -> dict[str, Any]:
+        return {"id": "12175364859"}
+
+    def iter_saved_tracks(
+        self,
+        *,
+        limit_total: int,
+        page_size: int = 50,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return [{"track": {"id": "saved-1", "artists": [{"name": "Saved Artist"}]}}]
+
+    def iter_top_items(
+        self,
+        item_type: str,
+        *,
+        limit_total: int,
+        time_range: str = "medium_term",
+        page_size: int = 50,
+    ) -> list[dict[str, Any]]:
+        if item_type == "tracks":
+            return [{"id": "top-1", "artists": [{"name": "Top Artist"}]}]
+        if item_type == "artists":
+            return [{"name": "Top Artist"}]
+        raise AssertionError(f"Unexpected item type: {item_type}")
+
+    def iter_current_user_playlists(
+        self,
+        *,
+        limit_total: int,
+        page_size: int = 50,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"id": "blocked", "name": "Blocked Playlist", "owner": {"id": "other"}},
+            {"id": "readable", "name": "Readable Playlist", "owner": {"id": "12175364859"}},
+        ]
+
+    def iter_playlist_items(
+        self,
+        playlist_id: str,
+        *,
+        limit_total: int,
+        page_size: int = 50,
+        market: str | None = None,
+        fields: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if playlist_id == "blocked":
+            raise ApiError(status_code=403, url="/playlists/blocked/tracks", message="Forbidden")
+        return [{"track": {"id": "readable-track", "artists": [{"name": "Playlist Artist"}]}}]
+
+    def get_recently_played(
+        self,
+        *,
+        limit: int = 20,
+        before: int | None = None,
+        after: int | None = None,
+    ) -> dict[str, Any]:
+        return {"items": []}

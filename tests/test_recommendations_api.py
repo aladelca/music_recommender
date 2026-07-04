@@ -137,6 +137,87 @@ def test_demo_api_service_uses_cached_spotify_profile_affinities(
     assert response["recommendations"][0]["track"]["id"] == "profile-track"
 
 
+def test_demo_api_service_adds_cached_spotify_profile_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_table(
+        tmp_path / "catalog-run" / "silver" / "tracks" / "dt=2026-07-04" / "part-000.parquet",
+        [
+            {
+                "spotify_track_id": "generic-track",
+                "track_name": "Generic Bright",
+                "artist_names": ["Other Artist"],
+                "primary_artist_name": "Other Artist",
+                "explicit": False,
+                "popularity": 10,
+                "spotify_url": "https://open.spotify.com/track/generic-track",
+            },
+        ],
+    )
+    write_table(
+        tmp_path
+        / "catalog-run"
+        / "silver"
+        / "audio_features"
+        / "dt=2026-07-04"
+        / "part-000.parquet",
+        [
+            {
+                "spotify_track_id": "generic-track",
+                "danceability": 0.76,
+                "energy": 0.78,
+                "valence": 0.88,
+            },
+        ],
+    )
+    profile_path = tmp_path / "profile.json"
+    JsonProfileCache(profile_path).save(
+        ProfileSnapshot(
+            profile=UserTasteProfile(
+                user_id="12175364859",
+                liked_track_ids=("spotify-only",),
+                known_track_ids=("spotify-only",),
+                liked_artist_names=("Profile Artist",),
+                track_affinity={"spotify-only": 1.0},
+                artist_affinity={"Profile Artist": 1.0},
+            ),
+            source="spotify",
+            synced_at="2026-07-04T00:00:00Z",
+            spotify_track_candidates=(
+                {
+                    "id": "spotify-only",
+                    "name": "Only In Spotify",
+                    "artist_names": ["Profile Artist"],
+                    "primary_artist_name": "Profile Artist",
+                    "explicit": False,
+                    "popularity": 90,
+                    "spotify_url": "https://open.spotify.com/track/spotify-only",
+                },
+            ),
+        )
+    )
+    monkeypatch.setenv("RECOMMENDER_PROFILE_CACHE_PATH", str(profile_path))
+    service = DemoApiService(settings_loader=lambda: build_settings(tmp_path))
+
+    response = service.recommend(
+        RecommendationRequest(
+            prompt="I just broke up and want songs to cheer me up",
+            limit=1,
+            catalog_run_id="catalog-run",
+        )
+    )
+
+    assert response["recommendations"][0]["track"] == {
+        "id": "spotify-only",
+        "name": "Only In Spotify",
+        "artist_names": ["Profile Artist"],
+        "explicit": False,
+        "popularity": 90,
+        "spotify_url": "https://open.spotify.com/track/spotify-only",
+    }
+
+
 class FakeApiService:
     def __init__(self) -> None:
         self.recommendation_request: dict[str, Any] | None = None

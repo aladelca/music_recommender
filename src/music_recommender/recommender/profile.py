@@ -70,6 +70,7 @@ class ProfileSnapshot:
     playlist_sources: tuple[JsonDict, ...] = ()
     time_ranges: tuple[str, ...] = ()
     missing_optional_scopes: tuple[str, ...] = ()
+    spotify_track_candidates: tuple[JsonDict, ...] = ()
 
     def to_dict(self) -> JsonDict:
         return {
@@ -82,6 +83,7 @@ class ProfileSnapshot:
             "synced_at": self.synced_at,
             "time_ranges": list(self.time_ranges),
             "missing_optional_scopes": list(self.missing_optional_scopes),
+            "spotify_track_candidates": list(self.spotify_track_candidates),
         }
 
 
@@ -140,6 +142,7 @@ class SpotifyProfileSyncService:
         liked_artist_names: list[str] = []
         artist_affinity: dict[str, float] = {}
         track_affinity: dict[str, float] = {}
+        spotify_track_candidates: list[JsonDict] = []
 
         saved_tracks = [
             item["track"]
@@ -162,6 +165,7 @@ class SpotifyProfileSyncService:
                 artist_weight=0.9,
                 liked=True,
             )
+            _append_track_candidate(spotify_track_candidates, track)
 
         for time_range in top_time_ranges:
             top_track_weight = _top_weight(time_range)
@@ -185,6 +189,7 @@ class SpotifyProfileSyncService:
                     artist_weight=top_track_weight,
                     liked=True,
                 )
+                _append_track_candidate(spotify_track_candidates, track)
 
             top_artists = list(
                 self.spotify_client.iter_top_items(
@@ -209,6 +214,11 @@ class SpotifyProfileSyncService:
                         limit_total=playlist_limit,
                     )
                 )
+            except ApiError as exc:
+                if exc.status_code not in {401, 403}:
+                    raise
+                missing_optional_scopes.append("playlist-read-private")
+            else:
                 selected_playlists = _selected_playlists(playlists, playlist_ids)
                 source_counts["playlists"] = len(selected_playlists)
                 remaining_playlist_tracks = playlist_track_limit
@@ -219,17 +229,34 @@ class SpotifyProfileSyncService:
                     requested_track_count = min(remaining_playlist_tracks, playlist_track_limit)
                     if requested_track_count <= 0:
                         break
-                    playlist_items = list(
-                        self.spotify_client.iter_playlist_items(
-                            playlist_id,
-                            limit_total=requested_track_count,
-                            market=market,
-                            fields=(
-                                "items(added_at,track(id,name,artists(name))),"
-                                "total,next,limit,offset"
-                            ),
+                    source_summary: JsonDict = {
+                        "id": playlist_id,
+                        "name": _optional_str(playlist.get("name")),
+                        "owner_id": _playlist_owner_id(playlist),
+                    }
+                    try:
+                        playlist_items = list(
+                            self.spotify_client.iter_playlist_items(
+                                playlist_id,
+                                limit_total=requested_track_count,
+                                market=market,
+                                fields=(
+                                    "items(added_at,track(id,name,artists(name))),"
+                                    "total,next,limit,offset"
+                                ),
+                            )
                         )
-                    )
+                    except ApiError as exc:
+                        if exc.status_code not in {401, 403}:
+                            raise
+                        playlist_sources.append(
+                            {
+                                **source_summary,
+                                "tracks_read": 0,
+                                "status": "skipped_inaccessible",
+                            }
+                        )
+                        continue
                     playlist_tracks = [
                         item["track"]
                         for item in playlist_items
@@ -239,9 +266,7 @@ class SpotifyProfileSyncService:
                     source_counts["playlist_tracks"] += len(playlist_tracks)
                     playlist_sources.append(
                         {
-                            "id": playlist_id,
-                            "name": _optional_str(playlist.get("name")),
-                            "owner_id": _playlist_owner_id(playlist),
+                            **source_summary,
                             "tracks_read": len(playlist_tracks),
                         }
                     )
@@ -258,10 +283,7 @@ class SpotifyProfileSyncService:
                             artist_weight=weight,
                             liked=False,
                         )
-            except ApiError as exc:
-                if exc.status_code not in {401, 403}:
-                    raise
-                missing_optional_scopes.append("playlist-read-private")
+                        _append_track_candidate(spotify_track_candidates, track)
 
         if include_recently_played and recently_played_limit > 0:
             try:
@@ -285,6 +307,7 @@ class SpotifyProfileSyncService:
                         artist_weight=0.3,
                         liked=False,
                     )
+                    _append_track_candidate(spotify_track_candidates, track)
             except ApiError as exc:
                 if exc.status_code not in {401, 403}:
                     raise
@@ -308,6 +331,7 @@ class SpotifyProfileSyncService:
             synced_at=datetime.now(UTC).isoformat(),
             time_ranges=tuple(top_time_ranges),
             missing_optional_scopes=tuple(missing_optional_scopes),
+            spotify_track_candidates=tuple(spotify_track_candidates),
         )
         self.cache.save(snapshot)
         return snapshot
@@ -361,6 +385,9 @@ def _snapshot_from_payload(payload: JsonDict) -> ProfileSnapshot:
         missing_optional_scopes=tuple(
             str(item) for item in payload.get("missing_optional_scopes", [])
         ),
+        spotify_track_candidates=_track_candidates_from_payload(
+            payload.get("spotify_track_candidates")
+        ),
     )
 
 
@@ -369,6 +396,72 @@ def _items(payload: JsonDict) -> list[JsonDict]:
     if not isinstance(items, list):
         return []
     return [item for item in items if isinstance(item, dict)]
+
+
+def _append_track_candidate(candidates: list[JsonDict], track: JsonDict) -> None:
+    candidate = _track_candidate_from_spotify_track(track)
+    if candidate is None:
+        return
+    if any(existing.get("id") == candidate["id"] for existing in candidates):
+        return
+    candidates.append(candidate)
+
+
+def _track_candidate_from_spotify_track(track: JsonDict) -> JsonDict | None:
+    track_id = _optional_str(track.get("id"))
+    if track_id is None:
+        return None
+    artist_names = _artist_names([track])
+    primary_artist_name = artist_names[0] if artist_names else None
+    return {
+        "id": track_id,
+        "name": _optional_str(track.get("name")) or track_id,
+        "artist_names": artist_names,
+        "primary_artist_name": primary_artist_name,
+        "explicit": bool(track.get("explicit") or False),
+        "popularity": _optional_int(track.get("popularity")),
+        "spotify_url": _spotify_url(track),
+    }
+
+
+def _track_candidates_from_payload(value: Any) -> tuple[JsonDict, ...]:
+    if not isinstance(value, list):
+        return ()
+    candidates: list[JsonDict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        candidate = _track_candidate_from_payload(item)
+        if candidate is None:
+            continue
+        if any(existing.get("id") == candidate["id"] for existing in candidates):
+            continue
+        candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _track_candidate_from_payload(payload: JsonDict) -> JsonDict | None:
+    track_id = _optional_str(payload.get("id"))
+    if track_id is None:
+        return None
+    artist_names = _string_list(payload.get("artist_names"))
+    primary_artist_name = _optional_str(payload.get("primary_artist_name"))
+    return {
+        "id": track_id,
+        "name": _optional_str(payload.get("name")) or track_id,
+        "artist_names": artist_names,
+        "primary_artist_name": primary_artist_name or (artist_names[0] if artist_names else None),
+        "explicit": bool(payload.get("explicit") or False),
+        "popularity": _optional_int(payload.get("popularity")),
+        "spotify_url": _optional_str(payload.get("spotify_url")),
+    }
+
+
+def _spotify_url(track: JsonDict) -> str | None:
+    external_urls = track.get("external_urls")
+    if not isinstance(external_urls, dict):
+        return None
+    return _optional_str(external_urls.get("spotify"))
 
 
 def _track_ids(tracks: list[JsonDict]) -> list[str]:
@@ -434,7 +527,8 @@ def _add_track_signal(
         if liked:
             _append_unique(liked_track_ids, track_id)
     for artist_name in _artist_names([track]):
-        _append_unique(liked_artist_names, artist_name)
+        if liked:
+            _append_unique(liked_artist_names, artist_name)
         _set_max(artist_affinity, artist_name, artist_weight)
 
 
@@ -479,6 +573,16 @@ def _playlist_owner_id(playlist: JsonDict) -> str | None:
     return _optional_str(owner.get("id"))
 
 
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list | tuple):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
 def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
@@ -498,3 +602,12 @@ def _int_mapping(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
     return {str(key): int(raw_value) for key, raw_value in value.items() if raw_value is not None}
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

@@ -17,8 +17,6 @@ def test_profile_required_scopes_include_playlist_reads_when_requested() -> None
         include_playlists=True,
         include_recently_played=True,
     ) == (
-        "playlist-modify-private",
-        "playlist-modify-public",
         "playlist-read-private",
         "user-library-read",
         "user-read-recently-played",

@@ -245,14 +245,12 @@ def _live_profile_check_payload(
 
 
 def _profile_required_scopes(
-    settings: Settings,
+    _settings: Settings,
     *,
     include_playlists: bool,
     include_recently_played: bool,
 ) -> tuple[str, ...]:
-    scopes = set(settings.spotify_user_scopes)
-    scopes.add("user-library-read")
-    scopes.add("user-top-read")
+    scopes = {"user-library-read", "user-top-read"}
     if include_playlists:
         scopes.add("playlist-read-private")
     if include_recently_played:

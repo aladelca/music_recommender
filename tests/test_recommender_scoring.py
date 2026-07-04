@@ -90,6 +90,47 @@ def test_rank_recommendations_deduplicates_and_limits_repeat_artists() -> None:
     assert len({candidate.track.id for candidate in ranked}) == len(ranked)
 
 
+def test_rank_recommendations_lets_prompt_mood_beat_wrong_mood_taste_match() -> None:
+    tracks = [
+        catalog_track(
+            "liked-slow",
+            "Liked Slow Song",
+            "Favorite Artist",
+            popularity=95,
+            valence=0.2,
+            energy=0.2,
+            danceability=0.2,
+        ),
+        catalog_track(
+            "hype-fit",
+            "Hype Fit",
+            "New Artist",
+            popularity=20,
+            valence=0.78,
+            energy=0.9,
+            danceability=0.86,
+        ),
+    ]
+    intent = MoodIntent(
+        label="high-energy",
+        target_valence=0.78,
+        target_energy=0.9,
+        target_danceability=0.86,
+    )
+    profile = UserTasteProfile(
+        user_id="demo",
+        liked_track_ids=("liked-slow",),
+        known_track_ids=("liked-slow",),
+        liked_artist_names=("Favorite Artist",),
+        track_affinity={"liked-slow": 1.0},
+        artist_affinity={"Favorite Artist": 1.0},
+    )
+
+    ranked = rank_recommendations(tracks, intent=intent, profile=profile, limit=1)
+
+    assert ranked[0].track.id == "hype-fit"
+
+
 def test_rank_recommendations_handles_empty_candidate_sets() -> None:
     assert (
         rank_recommendations(

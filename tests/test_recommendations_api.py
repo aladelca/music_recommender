@@ -204,12 +204,13 @@ def test_demo_api_service_adds_cached_spotify_profile_candidates(
     response = service.recommend(
         RecommendationRequest(
             prompt="I just broke up and want songs to cheer me up",
-            limit=1,
+            limit=2,
             catalog_run_id="catalog-run",
         )
     )
 
-    assert response["recommendations"][0]["track"] == {
+    assert response["recommendations"][0]["track"]["id"] == "generic-track"
+    assert response["recommendations"][1]["track"] == {
         "id": "spotify-only",
         "name": "Only In Spotify",
         "artist_names": ["Profile Artist"],
@@ -217,6 +218,104 @@ def test_demo_api_service_adds_cached_spotify_profile_candidates(
         "popularity": 90,
         "spotify_url": "https://open.spotify.com/track/spotify-only",
     }
+
+
+def test_demo_api_service_prefers_prompt_sensitive_tracks_over_featureless_profile_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_table(
+        tmp_path / "catalog-run" / "silver" / "tracks" / "dt=2026-07-04" / "part-000.parquet",
+        [
+            {
+                "spotify_track_id": "calm-track",
+                "track_name": "Calm Focus",
+                "artist_names": ["Study Artist"],
+                "primary_artist_name": "Study Artist",
+                "explicit": False,
+                "popularity": 20,
+                "spotify_url": "https://open.spotify.com/track/calm-track",
+            },
+            {
+                "spotify_track_id": "hype-track",
+                "track_name": "Hype Workout",
+                "artist_names": ["Gym Artist"],
+                "primary_artist_name": "Gym Artist",
+                "explicit": False,
+                "popularity": 20,
+                "spotify_url": "https://open.spotify.com/track/hype-track",
+            },
+        ],
+    )
+    write_table(
+        tmp_path
+        / "catalog-run"
+        / "silver"
+        / "audio_features"
+        / "dt=2026-07-04"
+        / "part-000.parquet",
+        [
+            {
+                "spotify_track_id": "calm-track",
+                "danceability": 0.42,
+                "energy": 0.34,
+                "valence": 0.58,
+            },
+            {
+                "spotify_track_id": "hype-track",
+                "danceability": 0.86,
+                "energy": 0.9,
+                "valence": 0.78,
+            },
+        ],
+    )
+    profile_path = tmp_path / "profile.json"
+    JsonProfileCache(profile_path).save(
+        ProfileSnapshot(
+            profile=UserTasteProfile(
+                user_id="12175364859",
+                liked_track_ids=("spotify-only",),
+                known_track_ids=("spotify-only",),
+                liked_artist_names=("Profile Artist",),
+                track_affinity={"spotify-only": 1.0},
+                artist_affinity={"Profile Artist": 1.0},
+            ),
+            source="spotify",
+            synced_at="2026-07-04T00:00:00Z",
+            spotify_track_candidates=(
+                {
+                    "id": "spotify-only",
+                    "name": "Only In Spotify",
+                    "artist_names": ["Profile Artist"],
+                    "primary_artist_name": "Profile Artist",
+                    "explicit": False,
+                    "popularity": 95,
+                    "spotify_url": "https://open.spotify.com/track/spotify-only",
+                },
+            ),
+        )
+    )
+    monkeypatch.setenv("RECOMMENDER_PROFILE_CACHE_PATH", str(profile_path))
+    monkeypatch.setenv("RECOMMENDER_SESSION_STORE_PATH", str(tmp_path / "sessions.json"))
+    service = DemoApiService(settings_loader=lambda: build_settings(tmp_path))
+
+    calm_response = service.recommend(
+        RecommendationRequest(
+            prompt="I need calm music to focus and study",
+            limit=1,
+            catalog_run_id="catalog-run",
+        )
+    )
+    hype_response = service.recommend(
+        RecommendationRequest(
+            prompt="I want hype workout party songs",
+            limit=1,
+            catalog_run_id="catalog-run",
+        )
+    )
+
+    assert calm_response["recommendations"][0]["track"]["id"] == "calm-track"
+    assert hype_response["recommendations"][0]["track"]["id"] == "hype-track"
 
 
 def test_demo_api_service_persists_recommendation_session(

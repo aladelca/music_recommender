@@ -12,6 +12,11 @@ from music_recommender.recommender.models import (
     UserTasteProfile,
 )
 
+MOOD_WEIGHT = 0.65
+TASTE_WEIGHT = 0.20
+NOVELTY_WEIGHT = 0.05
+POPULARITY_WEIGHT = 0.10
+
 
 def rank_recommendations(
     tracks: Iterable[CatalogTrack],
@@ -75,7 +80,11 @@ def _score_track(
     novelty = 0.0 if track.id in set(profile.known_track_ids) else 1.0
     popularity = _clamp((track.popularity or 0) / 100.0)
     total = (
-        (0.45 * mood) + (0.30 * taste) + (0.10 * novelty) + (0.15 * popularity) - diversity_penalty
+        (MOOD_WEIGHT * mood)
+        + (TASTE_WEIGHT * taste)
+        + (NOVELTY_WEIGHT * novelty)
+        + (POPULARITY_WEIGHT * popularity)
+        - diversity_penalty
     )
     return ScoreBreakdown(
         mood_fit=mood,
@@ -89,17 +98,20 @@ def _score_track(
 
 def _mood_fit(track: CatalogTrack, intent: MoodIntent) -> float:
     features = track.audio_features
-    if features is None:
-        return 0.5
-    values = [
-        _target_fit(features.valence, intent.target_valence),
-        _target_fit(features.energy, intent.target_energy),
-        _target_fit(features.danceability, intent.target_danceability),
-    ]
+    values: list[float] = []
+    if features is not None:
+        if features.valence is not None:
+            values.append(_target_fit(features.valence, intent.target_valence))
+        if features.energy is not None:
+            values.append(_target_fit(features.energy, intent.target_energy))
+        if features.danceability is not None:
+            values.append(_target_fit(features.danceability, intent.target_danceability))
     if track.lyrics_positive_score is not None:
         values.append(_clamp(track.lyrics_positive_score))
     if track.lyrics_negative_score is not None:
         values.append(1.0 - _clamp(track.lyrics_negative_score))
+    if not values:
+        return 0.0
     return sum(values) / len(values)
 
 

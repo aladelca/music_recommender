@@ -462,6 +462,9 @@ Implementation status on 2026-07-04:
 - Before adding DynamoDB-backed runtime state, the immediate Phase 4 implementation path shifted to
   strengthening live Spotify profile sync: paginated saved tracks, top items, selected playlist
   reads, richer local profile metadata, and recommendation use of cached profile affinities.
+- The next runtime-state step is local recommendation session persistence with playlist and
+  feedback validation against session recommendation output. After that is stable, implement
+  DynamoDB-backed adapters for the same session, feedback, and playlist store contracts.
 
 ### Phase 5: Demo Polish And Evaluation
 

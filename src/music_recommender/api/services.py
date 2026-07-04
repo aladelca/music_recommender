@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from music_recommender.agents.intent import parse_intent_with_agent
 from music_recommender.agents.orchestrator import AgenticRecommendationService
-from music_recommender.api.errors import ApiConfigurationError
+from music_recommender.api.errors import ApiConfigurationError, ApiNotFoundError, ApiValidationError
 from music_recommender.api.models import (
     FeedbackRequest,
     PlaylistCreateRequest,
@@ -24,6 +25,11 @@ from music_recommender.recommender.profile import (
     JsonProfileCache,
     ProfileSnapshot,
     SpotifyProfileSyncService,
+)
+from music_recommender.recommender.sessions import (
+    JsonRecommendationSessionStore,
+    PlaylistResult,
+    RecommendationSession,
 )
 from music_recommender.sources.spotify_user import SpotifyUserClient
 
@@ -65,29 +71,75 @@ class DemoApiService:
             ),
             agent_model=settings.openai_agent_model,
         )
-        return service.recommend(
+        response = service.recommend(
             prompt=request.prompt,
             limit=request.limit,
             create_playlist=request.create_playlist,
             use_agent_orchestrator=request.use_openai_agent,
-        ).to_dict()
+        )
+        payload = response.to_dict()
+        JsonRecommendationSessionStore(_state_path("RECOMMENDER_SESSION_STORE_PATH")).put(
+            _session_from_recommendation_payload(
+                payload,
+                user_id=profile.user_id,
+                catalog_run_id=catalog_run_id,
+                interaction_run_id=interaction_run_id,
+            )
+        )
+        return payload
 
     def create_playlist(self, request: PlaylistCreateRequest) -> JsonDict:
         settings = self._settings()
+        session_store = JsonRecommendationSessionStore(
+            _state_path("RECOMMENDER_SESSION_STORE_PATH")
+        )
+        session = session_store.get(request.session_id)
+        if session is None:
+            raise ApiNotFoundError(f"Recommendation session not found: {request.session_id}")
+        invalid_track_ids = session.invalid_track_ids(tuple(request.track_ids))
+        if invalid_track_ids:
+            raise ApiValidationError(
+                "Track IDs were not recommended for this session: " + ", ".join(invalid_track_ids)
+            )
         playlist_service = PlaylistService(
             spotify_client=self._spotify_user_client(settings),
             store=JsonPlaylistRecordStore(_state_path("RECOMMENDER_PLAYLIST_STORE_PATH")),
             user_id=settings.spotify_demo_user_id,
         )
-        return playlist_service.create_playlist(
+        result = playlist_service.create_playlist(
             session_id=request.session_id,
             name=request.name,
             description=request.description,
             track_ids=tuple(request.track_ids),
             public=request.public,
-        ).to_dict()
+        )
+        if not result.idempotent_replay or session.playlist_result is None:
+            session_store.update_playlist_result(
+                request.session_id,
+                PlaylistResult(
+                    playlist_id=result.playlist_id,
+                    url=result.url,
+                    requested_track_ids=tuple(request.track_ids),
+                    tracks_added=result.tracks_added,
+                    snapshot_id=result.snapshot_id,
+                    idempotent_replay=result.idempotent_replay,
+                    partial_failures=result.partial_failures,
+                ),
+            )
+        return result.to_dict()
 
     def record_feedback(self, request: FeedbackRequest) -> JsonDict:
+        session_store = JsonRecommendationSessionStore(
+            _state_path("RECOMMENDER_SESSION_STORE_PATH")
+        )
+        session = session_store.get(request.session_id)
+        if session is None:
+            raise ApiNotFoundError(f"Recommendation session not found: {request.session_id}")
+        invalid_track_ids = session.invalid_track_ids((request.track_id,))
+        if invalid_track_ids:
+            raise ApiValidationError(
+                "Track IDs were not recommended for this session: " + ", ".join(invalid_track_ids)
+            )
         feedback_service = FeedbackService(
             store=JsonFeedbackStore(_state_path("RECOMMENDER_FEEDBACK_STORE_PATH"))
         )
@@ -278,3 +330,37 @@ def _profile_payload(profile: UserTasteProfile) -> JsonDict:
     if profile.track_affinity is not None:
         payload["track_affinity"] = profile.track_affinity
     return payload
+
+
+def _session_from_recommendation_payload(
+    payload: JsonDict,
+    *,
+    user_id: str,
+    catalog_run_id: str,
+    interaction_run_id: str | None,
+) -> RecommendationSession:
+    now = datetime.now(UTC).isoformat()
+    recommendations = tuple(
+        dict(item) for item in payload.get("recommendations", []) if isinstance(item, dict)
+    )
+    return RecommendationSession(
+        session_id=str(payload["session_id"]),
+        user_id=user_id,
+        prompt=str(payload["prompt"]),
+        intent=dict(payload.get("intent") or {}),
+        recommended_track_ids=tuple(
+            str(item["track"]["id"])
+            for item in recommendations
+            if isinstance(item.get("track"), dict) and item["track"].get("id")
+        ),
+        recommendations=recommendations,
+        catalog_run_id=catalog_run_id,
+        interaction_run_id=interaction_run_id,
+        playlist_candidate=(
+            dict(payload["playlist_candidate"])
+            if isinstance(payload.get("playlist_candidate"), dict)
+            else None
+        ),
+        created_at=now,
+        updated_at=now,
+    )

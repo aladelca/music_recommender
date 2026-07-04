@@ -14,6 +14,7 @@ from music_recommender.api.services import DemoApiService
 from music_recommender.config import Settings
 from music_recommender.recommender.models import UserTasteProfile
 from music_recommender.recommender.profile import JsonProfileCache, ProfileSnapshot
+from music_recommender.recommender.sessions import JsonRecommendationSessionStore
 
 
 def test_recommendations_endpoint_returns_ranked_tracks_with_session() -> None:
@@ -216,6 +217,62 @@ def test_demo_api_service_adds_cached_spotify_profile_candidates(
         "popularity": 90,
         "spotify_url": "https://open.spotify.com/track/spotify-only",
     }
+
+
+def test_demo_api_service_persists_recommendation_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_table(
+        tmp_path / "catalog-run" / "silver" / "tracks" / "dt=2026-07-04" / "part-000.parquet",
+        [
+            {
+                "spotify_track_id": "sunny",
+                "track_name": "Sunny Recovery",
+                "artist_names": ["Dua Lipa"],
+                "primary_artist_name": "Dua Lipa",
+                "explicit": False,
+                "popularity": 80,
+                "spotify_url": "https://open.spotify.com/track/sunny",
+            },
+        ],
+    )
+    write_table(
+        tmp_path
+        / "catalog-run"
+        / "silver"
+        / "audio_features"
+        / "dt=2026-07-04"
+        / "part-000.parquet",
+        [
+            {
+                "spotify_track_id": "sunny",
+                "danceability": 0.76,
+                "energy": 0.78,
+                "valence": 0.88,
+            },
+        ],
+    )
+    session_path = tmp_path / "sessions.json"
+    monkeypatch.setenv("RECOMMENDER_SESSION_STORE_PATH", str(session_path))
+    service = DemoApiService(settings_loader=lambda: build_settings(tmp_path))
+
+    response = service.recommend(
+        RecommendationRequest(
+            prompt="I just broke up and want songs to cheer me up",
+            limit=1,
+            catalog_run_id="catalog-run",
+            interaction_run_id="interaction-run",
+        )
+    )
+
+    session = JsonRecommendationSessionStore(session_path).get(str(response["session_id"]))
+    assert session is not None
+    assert session.prompt == "I just broke up and want songs to cheer me up"
+    assert session.intent["label"] == "cheer-up"
+    assert session.recommended_track_ids == ("sunny",)
+    assert session.catalog_run_id == "catalog-run"
+    assert session.interaction_run_id == "interaction-run"
 
 
 class FakeApiService:

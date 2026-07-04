@@ -9,6 +9,7 @@ if [[ -n "${RECOMMENDER_API_KEY:-}" ]]; then
   API_KEY_ARGS=(-H "X-API-Key: ${RECOMMENDER_API_KEY}")
 fi
 
+# The API validates that SESSION_ID exists and every requested track was returned by that session.
 curl -sS -X POST "${API_URL}/playlists" \
   "${API_KEY_ARGS[@]}" \
   -H 'Content-Type: application/json' \

@@ -212,6 +212,10 @@ TRACK_IDS_JSON='["spotify-track-id-1","spotify-track-id-2"]' \
 bash scripts/demo_create_playlist.sh
 ```
 
+`SESSION_ID` must be a real recommendation session returned by `POST /recommendations`, and
+`TRACK_IDS_JSON` must be a non-empty subset of the track IDs returned in that same response. The API
+rejects unknown sessions and tracks that were not recommended for that session.
+
 Profile sync and playlist creation require `SPOTIFY_USER_REFRESH_TOKEN` with the configured user
 scopes. The API stores local demo state under `data/local/api_state/` by default.
 

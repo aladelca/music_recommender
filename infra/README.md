@@ -7,6 +7,11 @@ needed by later recommendation, playlist, profile, and feedback routes.
 The template is intentionally small and explainable. Phase 3 routes can be added to the same
 FastAPI app without changing the public API Gateway shape.
 
+Current runtime state still uses local JSON stores in the FastAPI service layer for sessions,
+profile cache, playlist records, and feedback events. The DynamoDB tables below are provisioned for
+the AWS follow-up adapter; do not treat the deployed API as durable across Lambda instances until
+those adapters are wired.
+
 ## Resources
 
 - API Gateway HTTP API

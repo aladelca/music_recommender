@@ -141,51 +141,51 @@ prepare the local JSON state layer to evolve into DynamoDB-backed runtime state 
 
 ## Implementation Tasks
 
-1. [ ] Add session domain models and JSON store.
+1. [x] Add session domain models and JSON store.
    - Files: `src/music_recommender/recommender/sessions.py`,
      `tests/test_recommendation_sessions.py`
    - Notes: Follow the dataclass and JSON serialization style from
      `recommender/playlists.py` and `recommender/feedback.py`. Include helpers to extract
      recommended track IDs and validate requested track subsets.
 
-2. [ ] Add API error types for client validation failures.
+2. [x] Add API error types for client validation failures.
    - Files: `src/music_recommender/api/errors.py`, `tests/test_recommendations_api.py`,
      `tests/test_playlists_api.py`, `tests/test_feedback_api.py`
    - Notes: Add something like `ApiValidationError` for 400 and `ApiNotFoundError` for 404.
      Preserve `ApiConfigurationError` as 503.
 
-3. [ ] Persist recommendation sessions from `POST /recommendations`.
+3. [x] Persist recommendation sessions from `POST /recommendations`.
    - Files: `src/music_recommender/api/services.py`, `tests/test_recommendations_api.py`
    - Notes: After `AgenticRecommendationService.recommend(...)` returns, convert the response into a
      `RecommendationSession` and save it. Include request `catalog_run_id` and
      `interaction_run_id` resolved values. Tests should use temp session store paths and verify the
      saved session contains the response track IDs.
 
-4. [ ] Validate playlist creation against persisted sessions.
+4. [x] Validate playlist creation against persisted sessions.
    - Files: `src/music_recommender/api/services.py`,
      `src/music_recommender/recommender/playlists.py`, `tests/test_playlists_api.py`
    - Notes: Prefer keeping Spotify side effects inside `PlaylistService`; do session lookup and
      track validation in a session-aware application service method before calling it. Preserve
      existing idempotency by `session_id`.
 
-5. [ ] Record playlist outcome on the recommendation session.
+5. [x] Record playlist outcome on the recommendation session.
    - Files: `src/music_recommender/recommender/sessions.py`,
      `src/music_recommender/api/services.py`, `tests/test_playlists_api.py`
    - Notes: Store playlist ID, URL, added tracks, snapshot ID, idempotent replay flag, partial
      failures, and updated timestamp. On idempotent replay, avoid duplicating playlist result state.
 
-6. [ ] Validate feedback against persisted sessions.
+6. [x] Validate feedback against persisted sessions.
    - Files: `src/music_recommender/api/services.py`,
      `src/music_recommender/recommender/feedback.py`, `tests/test_feedback_api.py`
    - Notes: Reject unknown session IDs and track IDs outside the recommendation. Keep feedback store
      behavior unchanged after validation. Do not implement feedback reranking here.
 
-7. [ ] Update local scripts and README flow notes.
+7. [x] Update local scripts and README flow notes.
    - Files: `README.md`, `scripts/demo_create_playlist.sh`
    - Notes: Document that `SESSION_ID` and `TRACK_IDS_JSON` must come from a recommendation response.
      Mention that playlist creation will now fail for unknown sessions or non-recommended tracks.
 
-8. [ ] Add AWS follow-up notes without wiring DynamoDB yet.
+8. [x] Add AWS follow-up notes without wiring DynamoDB yet.
    - Files: `plans/beta-demo-agentic-recommender.md`, `infra/README.md`
    - Notes: Mark session validation as the immediate local/runtime state step before DynamoDB.
      Document that DynamoDB adapter remains pending unless implemented in the same PR.

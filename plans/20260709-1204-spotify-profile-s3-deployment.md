@@ -200,7 +200,7 @@
 - [x] Add deployment helper scripts.
 - [x] Update README and data extraction docs for profile extraction and S3 reader behavior.
 - [x] Perform manual AWS S3 extraction validation.
-- [ ] Perform manual API SAM deployment smoke validation.
+- [x] Perform manual API SAM deployment smoke validation.
 
 ## Manual AWS Validation Notes
 
@@ -208,7 +208,7 @@
 - Spotify profile extraction to S3 succeeded for profile run `profile-20260709-live-smoke`, writing the required profile signal and interaction datasets.
 - `music-recommender-demo-readiness check-s3-data` returned ready for both the catalog and profile datasets.
 - `aws cloudformation validate-template --template-body file://infra/template.yaml` succeeded.
-- API deployment smoke validation was not run because the local `sam` CLI is not installed and Secrets Manager does not yet contain `music-recommender/demo/runtime`.
+- API deployment validation completed on 2026-07-09: SAM CLI 1.163.0 was installed, the runtime secret was provisioned, stack `music-recommender-demo` reached `UPDATE_COMPLETE`, and live health/profile/recommendation/feedback/playlist routes passed with DynamoDB persistence and scheduled profile sync.
 
 ## Tests
 

@@ -35,18 +35,40 @@ Parameters:
   OpenAIAgentModel:
     Type: String
     Default: ""
+  ProfileSyncScheduleExpression:
+    Type: String
+    Default: "cron(0 10 * * ? *)"
+    Description: EventBridge schedule for refreshing the configured Spotify profile cache.
 
 Resources:
+  MusicRecommenderHttpApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+
   MusicRecommenderHttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName:
         Ref: StageName
+      AccessLogSettings:
+        DestinationArn:
+          Fn::GetAtt:
+            - MusicRecommenderHttpApiAccessLogGroup
+            - Arn
+        Format: >-
+          {"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","status":"$context.status","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage"}
 
   MusicRecommenderUsersTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: user_id
           AttributeType: S
@@ -56,8 +78,14 @@ Resources:
 
   MusicRecommenderSessionsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: session_id
           AttributeType: S
@@ -67,8 +95,14 @@ Resources:
 
   MusicRecommenderFeedbackTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: session_id
           AttributeType: S
@@ -82,8 +116,14 @@ Resources:
 
   MusicRecommenderPlaylistsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: session_id
           AttributeType: S
@@ -101,7 +141,7 @@ Resources:
   MusicRecommenderApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../
+      CodeUri: ../.lambda-build/api
       Handler: music_recommender.api.lambda_handler.handler
       Runtime: python3.12
       Architectures:
@@ -204,6 +244,91 @@ Resources:
                 Fn::Sub: >-
                   arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AwsSecretsPrefix}*
 
+  MusicRecommenderProfileSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${MusicRecommenderProfileSyncFunction}"
+      RetentionInDays: 14
+
+  MusicRecommenderProfileSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../.lambda-build/profile-sync
+      Handler: music_recommender.api.scheduled_profile_handler.handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      MemorySize: 512
+      Timeout: 90
+      Environment:
+        Variables:
+          PYTHONPATH: /var/task/src
+          RUNTIME_STORE_BACKEND: dynamodb
+          SPOTIFY_APP_CLIENT_ID:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_ID}}"
+          SPOTIFY_APP_CLIENT_SECRET:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_SECRET}}"
+          SPOTIFY_DEMO_USER_ID:
+            Ref: SpotifyDemoUserId
+          SPOTIFY_USER_REFRESH_TOKEN:
+            Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:SPOTIFY_USER_REFRESH_TOKEN}}"
+          USERS_TABLE_NAME:
+            Ref: MusicRecommenderUsersTable
+      Events:
+        DailyProfileSync:
+          Type: Schedule
+          Properties:
+            Description: Refresh the configured Spotify profile cache every day.
+            Enabled: true
+            Schedule:
+              Ref: ProfileSyncScheduleExpression
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                Fn::GetAtt:
+                  - MusicRecommenderUsersTable
+                  - Arn
+
+  MusicRecommenderApiErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Music recommender API Lambda reported an error.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: MusicRecommenderApiFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  MusicRecommenderProfileSyncErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduled Spotify profile sync Lambda reported an error.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: MusicRecommenderProfileSyncFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
 Outputs:
   ApiUrl:
     Description: Base URL for the deployed API Gateway HTTP API.
@@ -213,6 +338,10 @@ Outputs:
     Description: Lambda function name for the API.
     Value:
       Ref: MusicRecommenderApiFunction
+  ProfileSyncFunctionName:
+    Description: Lambda function used for scheduled Spotify profile refresh.
+    Value:
+      Ref: MusicRecommenderProfileSyncFunction
   UsersTableName:
     Description: DynamoDB users table.
     Value:

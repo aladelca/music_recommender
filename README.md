@@ -269,6 +269,41 @@ scopes. The API stores local demo state under `data/local/api_state/` by default
 For the full local testing sequence, including required `.env` values, readiness checks, API calls,
 feedback, and Spotify playlist creation, see [docs/local-demo-runbook.md](docs/local-demo-runbook.md).
 
+## Operational AWS Deployment
+
+The operational deployment is a secured single-user backend API. S3 stores the extracted catalog
+and offline profile datasets, Lambda/API Gateway runs FastAPI, DynamoDB stores runtime state,
+Secrets Manager stores credentials, and EventBridge refreshes the live Spotify profile cache daily.
+
+Install SAM, sync the ignored local `.env` values into Secrets Manager, deploy the validated S3
+runs, and execute the live smoke suite:
+
+```bash
+brew install aws-sam-cli
+
+AWS_REGION_VALUE=us-east-1 \
+RUNTIME_SECRET_NAME=music-recommender/demo/runtime \
+bash scripts/sync_runtime_secret.sh
+
+STACK_NAME=music-recommender-demo \
+AWS_REGION_VALUE=us-east-1 \
+DATA_BUCKET_NAME=music-recommender-571600852509-us-east-1 \
+CATALOG_RUN_ID=20260522052343-7123c483 \
+INTERACTION_RUN_ID=profile-20260709-live-smoke \
+bash scripts/deploy_api_sam.sh
+
+STACK_NAME=music-recommender-demo \
+AWS_REGION_VALUE=us-east-1 \
+bash scripts/smoke_test_deployed_api.sh
+```
+
+The smoke suite creates one private Spotify playlist named `Music Recommender AWS Smoke ...` and
+then verifies that replaying the request does not create another playlist. It does not print the API
+key, OAuth token, Spotify profile payload, or runtime secret.
+
+See [docs/operational-aws-runbook.md](docs/operational-aws-runbook.md) for monitoring, secret
+rotation, data-run updates, retained DynamoDB tables, costs, and rollback procedures.
+
 ## Validation
 
 ```bash

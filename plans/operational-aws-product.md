@@ -69,41 +69,50 @@ Create and execute a plan that turns the current Spotify profile/S3 branch into 
 
 ## Implementation Tasks
 
-1. [ ] Establish the implementation branch and baseline.
+1. [x] Establish the implementation branch and baseline.
    - Files: `plans/operational-aws-product.md`, Beads issue `music-recommender-uqs`
    - Notes: Create `feature/operational-aws-product` from latest `main`, fast-forward it to include `feature/spotify-profile-s3-deployment`, and run focused baseline tests before production changes.
+   - Completed: Created the branch from `origin/main`, merged the prerequisite branch while preserving the authoritative Beads export, and passed the 105-test baseline suite.
 
-2. [ ] Add a tested scheduled Spotify profile refresh handler.
+2. [x] Add a tested scheduled Spotify profile refresh handler.
    - Files: `src/music_recommender/api/scheduled_profile_handler.py`, `tests/test_scheduled_profile_handler.py`
    - Notes: Write failing tests first. Validate EventBridge input, invoke `DemoApiService.sync_profile()` with explicit bounded defaults, return a redacted summary, and let service exceptions fail the invocation. Never log or return tokens/profile payloads.
+   - Completed: Added a strict scheduled-event handler with bounded sync defaults, count-field whitelisting, redacted output, and failure propagation; five focused tests pass.
 
-3. [ ] Harden and extend the SAM infrastructure for continuous operation.
+3. [x] Harden and extend the SAM infrastructure for continuous operation.
    - Files: `infra/template.yaml`, `tests/test_infra_template.py`
    - Notes: Write failing template assertions first. Add the scheduled Lambda and daily EventBridge schedule, its log group and permissions, API access logging, Lambda error alarms, DynamoDB point-in-time recovery/encryption/retention, schedule and alarm parameters, and useful outputs. Keep IAM scoped to the users table for the scheduler and existing resources for the API.
+   - Completed: Added a daily EventBridge-triggered profile Lambda, scoped users-table policy, API access logs, function error alarms, retained/PITR/encrypted tables, and outputs; focused tests and CloudFormation validation pass.
 
-4. [ ] Add safe, repeatable runtime secret provisioning.
+4. [x] Add safe, repeatable runtime secret provisioning.
    - Files: `scripts/sync_runtime_secret.sh`, `tests/test_deployment_scripts.py`, `.env.example`
    - Notes: Write tests first for required checks and redaction guarantees. Load required values from the ignored `.env`, preserve an existing API key or generate a strong one, create/update Secrets Manager without printing secret JSON, and support configurable region/secret name.
+   - Completed: Added a tested secret upsert that validates local values before AWS access, preserves an existing API key, streams JSON over stdin, suppresses AWS payload output, and documents the optional local API key variable.
 
-5. [ ] Make deployment and live smoke validation repeatable.
+5. [x] Make deployment and live smoke validation repeatable.
    - Files: `scripts/deploy_api_sam.sh`, `scripts/smoke_test_deployed_api.sh`, `tests/test_deployment_scripts.py`
    - Notes: Add strict parameter/readiness checks and stack output discovery. The smoke script must test `/health`, a rejected unauthenticated protected call, profile sync/status, recommendation creation, feedback persistence, playlist creation/idempotent replay, and redacted result output. It must not place literal credentials in repository files or command output.
+   - Completed: The deploy wrapper now checks the bucket, catalog/profile readiness, runtime secret, and SAM template before a non-interactive deploy. The smoke runner discovers stack outputs, keeps the API key in a protected header file, and exercises every live route including playlist idempotency.
 
-6. [ ] Document the operational runbook and rollback path.
+6. [x] Document the operational runbook and rollback path.
    - Files: `README.md`, `infra/README.md`, `docs/operational-aws-runbook.md`, `plans/operational-aws-product.md`
    - Notes: Document secret sync, SAM installation, deploy/update, outputs, smoke tests, scheduled refresh, logs/alarms, retained tables, estimated AWS resource shape, and safe rollback without exposing credentials.
+   - Completed: Added a dedicated operational runbook and updated the root/infrastructure docs for secure secret sync, deploy/smoke commands, scheduling, monitoring, costs, rotation, retained tables, and recovery.
 
-7. [ ] Run local quality gates and validate the packaged serverless application.
+7. [x] Run local quality gates and validate the packaged serverless application.
    - Files: all changed implementation and test files
    - Notes: Run focused tests after each TDD cycle, then Ruff format/check, mypy, full pytest, shell syntax checks, `sam validate --lint`, and `sam build`. Resolve all failures before AWS deployment.
+   - Completed: Ruff format/check, mypy, 122 tests, shell syntax, SAM lint, and SAM build pass. Isolated artifacts are below Lambda's size limit and contain no Parquet or CSV files (API 223,736 KB; scheduler 10,044 KB after pruning dependency test fixtures).
 
-8. [ ] Provision and deploy the live AWS stack.
+8. [x] Provision and deploy the live AWS stack.
    - Files: AWS Secrets Manager secret and CloudFormation stack created from `infra/template.yaml`
    - Notes: Install SAM CLI with the supported local package manager, validate current Spotify scopes without printing tokens, provision the runtime secret, deploy `music-recommender-demo` with the existing bucket/run IDs, and record only redacted stack outputs and statuses.
+   - Completed: Installed SAM CLI 1.163.0, validated the Spotify account/scopes, created `music-recommender/demo/runtime`, and deployed stack `music-recommender-demo` to `UPDATE_COMPLETE` at `https://4bds6ddj39.execute-api.us-east-1.amazonaws.com/`.
 
-9. [ ] Perform live end-to-end and persistence validation.
+9. [x] Perform live end-to-end and persistence validation.
    - Files: deployed API Gateway, Lambda, EventBridge, DynamoDB, CloudWatch, and one private Spotify playlist
    - Notes: Run the smoke script, verify users/sessions/feedback/playlists table items, directly invoke the scheduled handler once, confirm EventBridge is enabled and alarms/log groups exist, inspect recent Lambda errors, and rerun S3 readiness. Update both Beads issues and this checklist with redacted evidence.
+   - Completed: Live smoke returned ready with five OpenAI-backed recommendations, feedback persistence, one private Spotify playlist, and idempotent replay. Direct scheduled invocation succeeded with redacted profile counts. All four tables contain expected records with PITR enabled; EventBridge is enabled on `cron(0 10 * * ? *)`; both alarms are `OK`; Lambda and API access logs retain 14 days; S3 catalog/profile readiness is true.
 
 10. [ ] Commit and push the completed operational branch.
     - Files: all tracked changes and Beads export
@@ -164,3 +173,5 @@ STACK_NAME=music-recommender-demo AWS_REGION_VALUE=us-east-1 bash scripts/smoke_
 - Use `music-recommender-uqs` for implementation status. Close `music-recommender-qx1` only after the live API smoke test succeeds.
 - The repository has no Beads skill file at the configured project/global paths; follow the `bd prime` workflow directly.
 - A non-root AWS deployment identity remains a security follow-up even if this authorized deployment succeeds with the currently configured CLI credentials.
+- Live deployment evidence (2026-07-09): stack `music-recommender-demo` is `UPDATE_COMPLETE`; API URL is `https://4bds6ddj39.execute-api.us-east-1.amazonaws.com/`; successful smoke session `e4250c72-daed-4f55-9931-ce129dd9b462` created private playlist `6zbptJ7SEksvgIwlEdxGKZ` and verified idempotent replay.
+- Final Lambda artifacts contain no `.parquet` or `.csv` files. PyArrow remains as executable runtime code so the API can read private Parquet objects from S3.

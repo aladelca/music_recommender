@@ -9,7 +9,9 @@ from typing import Any, Literal
 
 from music_recommender.models import JsonDict
 from music_recommender.sources.http import ApiHttpClient
-from music_recommender.sources.spotify import API_BASE_URL, AUTH_BASE_URL
+
+AUTH_BASE_URL = "https://accounts.spotify.com"
+API_BASE_URL = "https://api.spotify.com/v1"
 
 TopItemType = Literal["artists", "tracks"]
 TopTimeRange = Literal["short_term", "medium_term", "long_term"]

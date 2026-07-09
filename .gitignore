@@ -4,6 +4,9 @@ data/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.aws-sam/
+.lambda-build/
+/requirements.txt
 __pycache__/
 *.py[cod]
 .DS_Store

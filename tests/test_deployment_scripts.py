@@ -130,7 +130,9 @@ def test_smoke_script_covers_protected_operational_flow_without_exposing_api_key
     ):
         assert path in script
     assert 'assert_status "401"' in script
-    assert "select(.idempotent_replay == false)" in script
+    assert "playlist_public: true" in script
+    assert ".playlist_result.playlist_id" in script
+    assert "select(.playlist_result.idempotent_replay == false)" in script
     assert "select(.idempotent_replay == true)" in script
 
 

@@ -39,11 +39,13 @@ def test_recommendations_endpoint_returns_ranked_tracks_with_session() -> None:
     assert [item["track"]["id"] for item in body["recommendations"]] == ["sunny"]
     assert body["playlist_candidate"]["name"] == "My Recovery Mix"
     assert body["playlist_candidate"]["track_ids"] == ["sunny"]
+    assert body["playlist_result"]["playlist_id"] == "playlist-1"
     assert service.recommendation_request == {
         "prompt": "I just broke up and want songs to cheer me up",
         "limit": 2,
         "create_playlist": True,
         "playlist_name": "My Recovery Mix",
+        "playlist_public": True,
         "use_openai_agent": False,
         "catalog_run_id": None,
         "interaction_run_id": None,
@@ -369,7 +371,12 @@ def test_demo_api_service_persists_recommendation_session(
     session_path = tmp_path / "sessions.json"
     monkeypatch.setenv("RECOMMENDER_SESSION_STORE_PATH", str(session_path))
     monkeypatch.setenv("RECOMMENDER_PROFILE_CACHE_PATH", str(tmp_path / "profile.json"))
-    service = DemoApiService(settings_loader=lambda: build_settings(tmp_path))
+    monkeypatch.setenv("RECOMMENDER_PLAYLIST_STORE_PATH", str(tmp_path / "playlists.json"))
+    spotify = FakeSpotifyPlaylistClient()
+    service = DemoApiServiceWithFakeSpotify(
+        settings_loader=lambda: build_settings(tmp_path),
+        spotify=spotify,
+    )
 
     response = service.recommend(
         RecommendationRequest(
@@ -390,8 +397,73 @@ def test_demo_api_service_persists_recommendation_session(
     assert session.catalog_run_id == "catalog-run"
     assert session.interaction_run_id == "interaction-run"
     assert response["playlist_candidate"]["name"] == "Persisted Recovery Mix"
+    assert response["playlist_result"] == {
+        "session_id": response["session_id"],
+        "playlist_id": "playlist-1",
+        "url": "https://open.spotify.com/playlist/playlist-1",
+        "tracks_added": ["sunny"],
+        "snapshot_id": "snapshot-1",
+        "idempotent_replay": False,
+        "partial_failures": [],
+    }
+    assert spotify.created_requests == [
+        {
+            "user_id": "12175364859",
+            "name": "Persisted Recovery Mix",
+            "description": ("Generated from prompt: I just broke up and want songs to cheer me up"),
+            "public": True,
+        }
+    ]
+    assert spotify.added_batches == [["sunny"]]
     assert session.playlist_candidate is not None
     assert session.playlist_candidate["name"] == "Persisted Recovery Mix"
+    assert session.playlist_result is not None
+    assert session.playlist_result.playlist_id == "playlist-1"
+
+
+class DemoApiServiceWithFakeSpotify(DemoApiService):
+    def __init__(self, *, settings_loader: Any, spotify: FakeSpotifyPlaylistClient) -> None:
+        super().__init__(settings_loader=settings_loader)
+        self.spotify = spotify
+
+    def _spotify_user_client(self, settings: Settings) -> Any:
+        return self.spotify
+
+
+class FakeSpotifyPlaylistClient:
+    def __init__(self) -> None:
+        self.created_requests: list[dict[str, Any]] = []
+        self.added_batches: list[list[str]] = []
+
+    def create_playlist(
+        self,
+        user_id: str,
+        *,
+        name: str,
+        description: str = "",
+        public: bool = False,
+    ) -> dict[str, Any]:
+        self.created_requests.append(
+            {
+                "user_id": user_id,
+                "name": name,
+                "description": description,
+                "public": public,
+            }
+        )
+        return {
+            "id": "playlist-1",
+            "external_urls": {"spotify": "https://open.spotify.com/playlist/playlist-1"},
+        }
+
+    def add_playlist_items(
+        self,
+        playlist_id: str,
+        track_ids_or_uris: list[str],
+    ) -> dict[str, Any]:
+        assert playlist_id == "playlist-1"
+        self.added_batches.append(track_ids_or_uris)
+        return {"snapshot_id": "snapshot-1"}
 
 
 class FakeApiService:
@@ -438,6 +510,19 @@ class FakeApiService:
                 "description": "Generated from prompt: " + request.prompt,
                 "track_ids": ["sunny"],
             },
+            "playlist_result": (
+                {
+                    "session_id": "session-1",
+                    "playlist_id": "playlist-1",
+                    "url": "https://open.spotify.com/playlist/playlist-1",
+                    "tracks_added": ["sunny"],
+                    "snapshot_id": "snapshot-1",
+                    "idempotent_replay": False,
+                    "partial_failures": [],
+                }
+                if request.create_playlist
+                else None
+            ),
         }
 
 

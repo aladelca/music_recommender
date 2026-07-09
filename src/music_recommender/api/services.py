@@ -89,7 +89,8 @@ class DemoApiService:
             use_agent_orchestrator=request.use_openai_agent,
         )
         payload = response.to_dict()
-        self._session_store(settings).put(
+        session_store = self._session_store(settings)
+        session_store.put(
             _session_from_recommendation_payload(
                 payload,
                 user_id=profile.user_id,
@@ -97,6 +98,25 @@ class DemoApiService:
                 interaction_run_id=interaction_run_id,
             )
         )
+        payload["playlist_result"] = None
+        if request.create_playlist:
+            playlist_candidate = payload.get("playlist_candidate")
+            if not isinstance(playlist_candidate, dict):
+                raise RuntimeError("Playlist candidate was not generated for playlist creation.")
+            track_ids = playlist_candidate.get("track_ids")
+            if not isinstance(track_ids, list) or not track_ids:
+                raise ApiValidationError(
+                    "Cannot create a Spotify playlist without recommended tracks."
+                )
+            payload["playlist_result"] = self.create_playlist(
+                PlaylistCreateRequest(
+                    session_id=str(payload["session_id"]),
+                    name=str(playlist_candidate["name"]),
+                    description=str(playlist_candidate["description"]),
+                    track_ids=[str(track_id) for track_id in track_ids],
+                    public=request.playlist_public,
+                )
+            )
         return payload
 
     def create_playlist(self, request: PlaylistCreateRequest) -> JsonDict:

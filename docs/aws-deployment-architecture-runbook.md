@@ -70,10 +70,12 @@ CloudFormation retain policies for deletion and replacement.
 5. The ranker uses the cached profile in DynamoDB, plus any request-level profile additions.
 6. Requests with `use_openai_agent: true` call OpenAI for intent parsing and orchestration. The
    deterministic ranking tool and track-ID guardrail remain authoritative.
-7. The complete recommendation response is stored in the sessions table before it is returned.
-8. Feedback and playlist requests validate their session and track IDs against that stored result.
-9. Playlist creation exchanges the Spotify refresh token and uses the Spotify Web API. Its result is
-   stored by session ID so retries do not create duplicate playlists.
+7. The complete recommendation response is stored in the sessions table before any playlist side
+   effect.
+8. When `create_playlist` is true, the API exchanges the Spotify refresh token, creates the playlist,
+   stores its result by session ID, and returns it as `playlist_result`.
+9. Feedback and explicit playlist requests validate their session and track IDs against the stored
+   recommendation. Replaying `POST /playlists` for that session returns the existing result.
 
 ## Profile Refresh Flow
 
@@ -201,7 +203,7 @@ AWS_REGION_VALUE=us-east-1 \
 bash scripts/smoke_test_deployed_api.sh
 ```
 
-The smoke suite performs a real profile sync and creates one private Spotify playlist, then verifies
+The smoke suite performs a real profile sync and creates one public Spotify playlist, then verifies
 idempotent replay. Use [operational-aws-runbook.md](operational-aws-runbook.md) for secret rotation,
 monitoring, rollback, and incident procedures. Use
 [api-usage-runbook.md](api-usage-runbook.md) for individual API calls.

@@ -251,7 +251,12 @@ Request recommendations:
 bash scripts/demo_recommend.sh
 ```
 
-Create a Spotify playlist only after explicitly choosing tracks from a recommendation response:
+Set `create_playlist: true`, optionally provide `playlist_name`, and leave `playlist_public: true`
+to create a public Spotify playlist in the same recommendation call. The response includes its URL
+under `playlist_result`.
+
+Alternatively, create a Spotify playlist after explicitly choosing tracks from a recommendation
+response:
 
 ```bash
 SESSION_ID=<session-id> \
@@ -297,7 +302,7 @@ AWS_REGION_VALUE=us-east-1 \
 bash scripts/smoke_test_deployed_api.sh
 ```
 
-The smoke suite creates one private Spotify playlist named `Music Recommender AWS Smoke ...` and
+The smoke suite creates one public Spotify playlist named `Music Recommender AWS Smoke ...` and
 then verifies that replaying the request does not create another playlist. It does not print the API
 key, OAuth token, Spotify profile payload, or runtime secret.
 

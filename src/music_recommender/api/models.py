@@ -40,6 +40,7 @@ class RecommendationRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=50)
     create_playlist: bool = False
     playlist_name: str | None = Field(default=None, min_length=1)
+    playlist_public: bool = True
     use_openai_agent: bool = False
     catalog_run_id: str | None = None
     interaction_run_id: str | None = None

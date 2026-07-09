@@ -111,21 +111,31 @@ status="$(request_json GET /profile true '' "$profile_file")"
 assert_status "200" "$status" "profile status"
 jq -e '.present == true and .synced_at' "$profile_file" >/dev/null
 
+playlist_name="Music Recommender AWS Smoke $(date -u +%Y%m%d-%H%M%S)"
 recommendation_body="$(jq -cn \
+  --arg playlist_name "$playlist_name" \
   --argjson use_openai_agent "$SMOKE_USE_OPENAI_AGENT" \
   '{
     prompt: "Give me upbeat songs that still feel emotionally honest",
     limit: 5,
-    create_playlist: false,
+    create_playlist: true,
+    playlist_name: $playlist_name,
+    playlist_public: true,
     use_openai_agent: $use_openai_agent
   }')"
 recommendation_file="$tmp_dir/recommendation.json"
 status="$(request_json POST /recommendations true "$recommendation_body" "$recommendation_file")"
 assert_status "200" "$status" "recommendation"
-jq -e '.session_id and (.recommendations | length > 0)' "$recommendation_file" >/dev/null
+jq -e '
+  select(.playlist_result.idempotent_replay == false) |
+  .session_id and
+  (.recommendations | length > 0) and
+  .playlist_result.playlist_id and
+  .playlist_result.url
+' "$recommendation_file" >/dev/null
 session_id="$(jq -er '.session_id' "$recommendation_file")"
 first_track_id="$(jq -er '.recommendations[0].track.id' "$recommendation_file")"
-track_ids_json="$(jq -c '[.recommendations[].track.id] | .[:3]' "$recommendation_file")"
+track_ids_json="$(jq -c '.playlist_candidate.track_ids' "$recommendation_file")"
 
 feedback_body="$(jq -cn \
   --arg session_id "$session_id" \
@@ -136,7 +146,6 @@ status="$(request_json POST /feedback true "$feedback_body" "$feedback_file")"
 assert_status "200" "$status" "feedback"
 jq -e '.status == "recorded" and .event_id' "$feedback_file" >/dev/null
 
-playlist_name="Music Recommender AWS Smoke $(date -u +%Y%m%d-%H%M%S)"
 playlist_body="$(jq -cn \
   --arg session_id "$session_id" \
   --arg name "$playlist_name" \
@@ -144,20 +153,15 @@ playlist_body="$(jq -cn \
   '{
     session_id: $session_id,
     name: $name,
-    description: "Private playlist created by the AWS deployment smoke test",
+    description: "Public playlist created by the AWS deployment smoke test",
     track_ids: $track_ids,
-    public: false
+    public: true
   }')"
-playlist_file="$tmp_dir/playlist.json"
-status="$(request_json POST /playlists true "$playlist_body" "$playlist_file")"
-assert_status "200" "$status" "playlist creation"
-jq -e 'select(.idempotent_replay == false) | .playlist_id' "$playlist_file" >/dev/null
-
 playlist_replay_file="$tmp_dir/playlist-replay.json"
 status="$(request_json POST /playlists true "$playlist_body" "$playlist_replay_file")"
 assert_status "200" "$status" "playlist idempotent replay"
 jq -e 'select(.idempotent_replay == true) | .playlist_id' "$playlist_replay_file" >/dev/null
-playlist_id="$(jq -er '.playlist_id' "$playlist_file")"
+playlist_id="$(jq -er '.playlist_result.playlist_id' "$recommendation_file")"
 
 jq -n \
   --arg api_url "$api_url" \

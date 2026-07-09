@@ -157,6 +157,7 @@ cat > "$API_WORK_DIR/recommendation-request.json" <<'JSON'
   "limit": 5,
   "create_playlist": false,
   "playlist_name": null,
+  "playlist_public": true,
   "use_openai_agent": false,
   "liked_artist_names": [],
   "liked_track_ids": [],
@@ -185,7 +186,8 @@ jq '{
       explanation: .explanation
     }
   ],
-  playlist_candidate
+  playlist_candidate,
+  playlist_result
 }' "$API_WORK_DIR/recommendation.json"
 ```
 
@@ -197,8 +199,9 @@ Request-level `liked_*`, `known_track_ids`, and `blocked_artist_names` values au
 profile for that request. `catalog_run_id`, `interaction_run_id`, and `demo_user_id` are operational
 overrides; normal callers should rely on the deployment defaults.
 
-Setting `create_playlist: true` returns a `playlist_candidate`. Add `playlist_name` to replace its
-generated `Music Recommender - <intent>` name:
+Setting `create_playlist: true` persists the recommendation session and immediately creates the
+Spotify playlist from all returned candidate tracks. Add `playlist_name` to replace the generated
+`Music Recommender - <intent>` name. `playlist_public` defaults to `true`:
 
 ```json
 {
@@ -206,13 +209,15 @@ generated `Music Recommender - <intent>` name:
   "limit": 5,
   "create_playlist": true,
   "playlist_name": "Adrian's Upbeat Mix",
+  "playlist_public": true,
   "use_openai_agent": false
 }
 ```
 
 `playlist_name` must be non-empty when supplied and has no effect when `create_playlist` is false.
-The recommendation call does not write to Spotify. Use the returned session, track IDs, and candidate
-name in `POST /playlists` to perform that explicit side effect.
+The response includes `playlist_result` with the Spotify playlist ID, URL, tracks added, snapshot
+ID, idempotency state, and partial failures. Set `playlist_public` to `false` to request a private
+playlist.
 
 ## Record Feedback
 
@@ -243,10 +248,11 @@ curl -fsS \
 The response contains `event_id` and `status: "recorded"`. Feedback is persisted for analysis but
 is not yet folded back into profile weights or ranking.
 
-## Create A Private Spotify Playlist
+## Create Or Retry A Spotify Playlist Explicitly
 
-Playlist creation is an external side effect. Review the recommendation response before running
-this call. Track IDs must be a non-empty subset from the same recommendation session.
+Use `POST /playlists` when `create_playlist` was false and you want to review or select a subset of
+tracks first. It can also safely replay a session that already created a playlist automatically.
+Track IDs must be a non-empty subset from the same recommendation session.
 
 ```bash
 session_id="$(jq -er '.session_id' "$API_WORK_DIR/recommendation.json")"

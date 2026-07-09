@@ -82,8 +82,8 @@ bash scripts/smoke_test_deployed_api.sh
 ```
 
 The suite verifies health/configuration, rejected unauthenticated access, live Spotify profile sync,
-profile status, recommendation creation, feedback persistence, private playlist creation, and
-playlist idempotency. It creates one private playlist with an `AWS Smoke` name. Set
+profile status, recommendation creation, feedback persistence, automatic public playlist creation,
+and playlist idempotency. It creates one public playlist with an `AWS Smoke` name. Set
 `SMOKE_USE_OPENAI_AGENT=false` only when isolating deterministic recommendation behavior during an
 OpenAI incident; normal validation exercises the OpenAI agent path.
 
@@ -183,7 +183,7 @@ On 2026-07-09, stack `music-recommender-demo` reached `UPDATE_COMPLETE`. The liv
 - Public health succeeds and protected profile access returns `401` without the API key.
 - Spotify profile sync reads saved/top/playlist signals and persists the cache in DynamoDB.
 - OpenAI-backed recommendation returns catalog tracks and persists recommendation sessions.
-- Feedback persists and one private Spotify smoke playlist was created with idempotent replay.
+- Feedback persists and one Spotify smoke playlist was created with idempotent replay.
 - Direct scheduled Lambda invocation succeeds; its EventBridge rule is enabled for
   `cron(0 10 * * ? *)`.
 - All four DynamoDB tables have point-in-time recovery enabled, both Lambda alarms are `OK`, and

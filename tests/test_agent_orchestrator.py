@@ -63,7 +63,28 @@ def test_agentic_recommendation_service_exposes_playlist_candidate_only_when_req
     )
 
     assert response.playlist_candidate is not None
+    assert response.playlist_candidate.name == "Music Recommender - cheer-up"
     assert response.playlist_candidate.track_ids == ("sunny",)
+
+
+def test_agentic_recommendation_service_overrides_playlist_candidate_name() -> None:
+    service = AgenticRecommendationService(
+        catalog=RecommenderCatalog(
+            tracks=(catalog_track("sunny", "Sunny Recovery", "Dua Lipa", valence=0.94),)
+        ),
+        profile=UserTasteProfile(user_id="demo"),
+        intent_parser=lambda prompt: ParsedMoodIntent.cheer_up_after_breakup(),
+    )
+
+    response = service.recommend(
+        prompt="make me a playlist to cheer up",
+        limit=1,
+        create_playlist=True,
+        playlist_name="My Recovery Mix",
+    )
+
+    assert response.playlist_candidate is not None
+    assert response.playlist_candidate.name == "My Recovery Mix"
 
 
 def test_agentic_recommendation_service_can_run_tool_backed_agent_orchestrator() -> None:
@@ -105,10 +126,14 @@ def test_agentic_recommendation_service_can_run_tool_backed_agent_orchestrator()
     response = service.recommend(
         prompt="cheer me up",
         limit=2,
+        create_playlist=True,
+        playlist_name="Agent Recovery Mix",
         use_agent_orchestrator=True,
     )
 
     assert [candidate.track.id for candidate in response.recommendations] == ["sunny"]
+    assert response.playlist_candidate is not None
+    assert response.playlist_candidate.name == "Agent Recovery Mix"
 
 
 def test_agentic_recommendation_service_rejects_agent_tracks_outside_tool_output() -> None:

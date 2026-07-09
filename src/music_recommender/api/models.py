@@ -39,6 +39,7 @@ class RecommendationRequest(BaseModel):
     prompt: str = Field(min_length=1)
     limit: int = Field(default=10, ge=1, le=50)
     create_playlist: bool = False
+    playlist_name: str | None = Field(default=None, min_length=1)
     use_openai_agent: bool = False
     catalog_run_id: str | None = None
     interaction_run_id: str | None = None

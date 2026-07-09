@@ -103,6 +103,7 @@ class AgenticRecommendationService:
         prompt: str,
         limit: int,
         create_playlist: bool = False,
+        playlist_name: str | None = None,
         use_agent_orchestrator: bool = False,
     ) -> AgenticRecommendationResponse:
         intent = self.intent_parser(prompt)
@@ -114,6 +115,7 @@ class AgenticRecommendationService:
                 context=context,
                 limit=limit,
                 create_playlist=create_playlist,
+                playlist_name=playlist_name,
             )
         return self._recommend_deterministically(
             prompt=prompt,
@@ -121,6 +123,7 @@ class AgenticRecommendationService:
             context=context,
             limit=limit,
             create_playlist=create_playlist,
+            playlist_name=playlist_name,
         )
 
     def _recommend_deterministically(
@@ -131,6 +134,7 @@ class AgenticRecommendationService:
         context: AgentToolContext,
         limit: int,
         create_playlist: bool,
+        playlist_name: str | None,
     ) -> AgenticRecommendationResponse:
         tool_payload = rank_recommendations_payload(context, intent=intent, limit=limit)
         final_track_ids = validate_tracks_from_tool_output(
@@ -140,7 +144,7 @@ class AgenticRecommendationService:
         recommendations = _recommendations_for_track_ids(context, final_track_ids)
         playlist_candidate = (
             PlaylistCandidate(
-                name=_playlist_name(intent),
+                name=_playlist_name(intent, override=playlist_name),
                 description=f"Generated from prompt: {prompt}",
                 track_ids=final_track_ids,
             )
@@ -167,6 +171,7 @@ class AgenticRecommendationService:
         context: AgentToolContext,
         limit: int,
         create_playlist: bool,
+        playlist_name: str | None,
     ) -> AgenticRecommendationResponse:
         agent = build_recommendation_orchestrator_agent(
             context=context,
@@ -197,7 +202,7 @@ class AgenticRecommendationService:
         )
         playlist_candidate = (
             PlaylistCandidate(
-                name=_playlist_name(intent),
+                name=_playlist_name(intent, override=playlist_name),
                 description=f"Generated from prompt: {prompt}",
                 track_ids=final_track_ids,
             )
@@ -284,8 +289,8 @@ def _recommendations_for_track_ids(
     return tuple(candidates_by_id[track_id] for track_id in track_ids)
 
 
-def _playlist_name(intent: ParsedMoodIntent) -> str:
-    return f"Music Recommender - {intent.label}"
+def _playlist_name(intent: ParsedMoodIntent, *, override: str | None = None) -> str:
+    return override or f"Music Recommender - {intent.label}"
 
 
 def _recommendation_to_payload(candidate: RecommendationCandidate) -> JsonDict:

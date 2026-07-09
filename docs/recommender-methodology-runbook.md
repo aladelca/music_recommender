@@ -166,7 +166,8 @@ they are not evidence that the track will cause a particular emotional outcome.
 - Recommendation IDs must come from the rank tool's candidate output.
 - The API persists a recommendation session before accepting feedback or playlist creation.
 - Feedback and playlist track IDs must belong to that session.
-- `create_playlist: true` during recommendation creates only a candidate payload.
+- `create_playlist: true` during recommendation creates only a candidate payload; an optional
+  `playlist_name` replaces the generated candidate name.
 - `POST /playlists` is the explicit Spotify side effect and is idempotent by session ID.
 
 These controls support traceability and prevent an agent or caller from inventing a Spotify track

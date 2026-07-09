@@ -28,6 +28,7 @@ def test_recommendations_endpoint_returns_ranked_tracks_with_session() -> None:
             "limit": 2,
             "liked_artist_names": ["Dua Lipa"],
             "create_playlist": True,
+            "playlist_name": "My Recovery Mix",
         },
     )
 
@@ -36,11 +37,13 @@ def test_recommendations_endpoint_returns_ranked_tracks_with_session() -> None:
     assert body["session_id"] == "session-1"
     assert body["intent"]["label"] == "cheer-up"
     assert [item["track"]["id"] for item in body["recommendations"]] == ["sunny"]
+    assert body["playlist_candidate"]["name"] == "My Recovery Mix"
     assert body["playlist_candidate"]["track_ids"] == ["sunny"]
     assert service.recommendation_request == {
         "prompt": "I just broke up and want songs to cheer me up",
         "limit": 2,
         "create_playlist": True,
+        "playlist_name": "My Recovery Mix",
         "use_openai_agent": False,
         "catalog_run_id": None,
         "interaction_run_id": None,
@@ -56,6 +59,17 @@ def test_recommendations_endpoint_validates_limit() -> None:
     client = TestClient(create_app(load_env=False, service=FakeApiService()))
 
     response = client.post("/recommendations", json={"prompt": "cheer me up", "limit": 0})
+
+    assert response.status_code == 422
+
+
+def test_recommendations_endpoint_rejects_empty_playlist_name() -> None:
+    client = TestClient(create_app(load_env=False, service=FakeApiService()))
+
+    response = client.post(
+        "/recommendations",
+        json={"prompt": "cheer me up", "create_playlist": True, "playlist_name": ""},
+    )
 
     assert response.status_code == 422
 
@@ -361,6 +375,8 @@ def test_demo_api_service_persists_recommendation_session(
         RecommendationRequest(
             prompt="I just broke up and want songs to cheer me up",
             limit=1,
+            create_playlist=True,
+            playlist_name="Persisted Recovery Mix",
             catalog_run_id="catalog-run",
             interaction_run_id="interaction-run",
         )
@@ -373,6 +389,9 @@ def test_demo_api_service_persists_recommendation_session(
     assert session.recommended_track_ids == ("sunny",)
     assert session.catalog_run_id == "catalog-run"
     assert session.interaction_run_id == "interaction-run"
+    assert response["playlist_candidate"]["name"] == "Persisted Recovery Mix"
+    assert session.playlist_candidate is not None
+    assert session.playlist_candidate["name"] == "Persisted Recovery Mix"
 
 
 class FakeApiService:
@@ -415,7 +434,7 @@ class FakeApiService:
                 }
             ],
             "playlist_candidate": {
-                "name": "Music Recommender - cheer-up",
+                "name": request.playlist_name or "Music Recommender - cheer-up",
                 "description": "Generated from prompt: " + request.prompt,
                 "track_ids": ["sunny"],
             },

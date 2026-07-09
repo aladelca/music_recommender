@@ -85,6 +85,7 @@ class DemoApiService:
             prompt=request.prompt,
             limit=request.limit,
             create_playlist=request.create_playlist,
+            playlist_name=request.playlist_name,
             use_agent_orchestrator=request.use_openai_agent,
         )
         payload = response.to_dict()

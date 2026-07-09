@@ -156,6 +156,7 @@ cat > "$API_WORK_DIR/recommendation-request.json" <<'JSON'
   "prompt": "Give me upbeat, clean songs that still feel emotionally honest",
   "limit": 5,
   "create_playlist": false,
+  "playlist_name": null,
   "use_openai_agent": false,
   "liked_artist_names": [],
   "liked_track_ids": [],
@@ -196,8 +197,22 @@ Request-level `liked_*`, `known_track_ids`, and `blocked_artist_names` values au
 profile for that request. `catalog_run_id`, `interaction_run_id`, and `demo_user_id` are operational
 overrides; normal callers should rely on the deployment defaults.
 
-Setting `create_playlist: true` returns a `playlist_candidate`. It does not write to Spotify. The
-only route that creates a Spotify playlist is `POST /playlists`.
+Setting `create_playlist: true` returns a `playlist_candidate`. Add `playlist_name` to replace its
+generated `Music Recommender - <intent>` name:
+
+```json
+{
+  "prompt": "Give me upbeat songs that still feel emotionally honest",
+  "limit": 5,
+  "create_playlist": true,
+  "playlist_name": "Adrian's Upbeat Mix",
+  "use_openai_agent": false
+}
+```
+
+`playlist_name` must be non-empty when supplied and has no effect when `create_playlist` is false.
+The recommendation call does not write to Spotify. Use the returned session, track IDs, and candidate
+name in `POST /playlists` to perform that explicit side effect.
 
 ## Record Feedback
 

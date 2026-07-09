@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 
 from music_recommender.config import Settings, load_settings
 from music_recommender.models import JsonDict
-from music_recommender.recommender.data import check_local_recommender_data
+from music_recommender.recommender.data import (
+    check_local_recommender_data,
+    check_s3_recommender_data,
+)
 from music_recommender.sources.spotify_user import (
     SpotifyUserClient,
     TopItemType,
@@ -68,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
     check_data.add_argument("--data-root", type=Path, default=None)
     check_data.add_argument("--run-id", default=None)
 
+    check_s3_data = subparsers.add_parser(
+        "check-s3-data",
+        help="Read S3 recommender Parquet outputs for a run.",
+    )
+    check_s3_data.add_argument("--data-root", default=None)
+    check_s3_data.add_argument("--bucket", default=None)
+    check_s3_data.add_argument("--run-id", "--catalog-run-id", dest="run_id", required=True)
+
     auth_url = subparsers.add_parser("auth-url", help="Print the Spotify OAuth URL.")
     auth_url.add_argument("--state", default=None)
 
@@ -104,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     command = str(args.command)
     if command == "check-data":
         return _check_data(args)
+    if command == "check-s3-data":
+        return _check_s3_data(args)
     if command == "auth-url":
         return _auth_url(args)
     if command == "exchange-code":
@@ -118,6 +131,16 @@ def main(argv: list[str] | None = None) -> int:
 def _check_data(args: argparse.Namespace) -> int:
     data_root = args.data_root or Path(os.getenv("RECOMMENDER_DATA_ROOT", "data/local"))
     summary = check_local_recommender_data(data_root, run_id=args.run_id)
+    print(json.dumps(summary.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _check_s3_data(args: argparse.Namespace) -> int:
+    bucket = args.bucket or os.getenv("MUSIC_RECOMMENDER_BUCKET")
+    data_root = args.data_root or (f"s3://{bucket}" if bucket else None)
+    if data_root is None:
+        raise SystemExit("--data-root, --bucket, or MUSIC_RECOMMENDER_BUCKET is required")
+    summary = check_s3_recommender_data(str(data_root), run_id=str(args.run_id))
     print(json.dumps(summary.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

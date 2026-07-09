@@ -188,6 +188,19 @@
    - Deploy the SAM stack.
    - Confirm API Gateway output and smoke-test live routes with redacted responses.
 
+## Implementation Progress
+
+- [ ] Factor profile normalization out of `SpotifyProfileSyncService.sync_profile`.
+- [x] Implement `src/music_recommender/pipeline/profile.py` for local/S3 Spotify profile medallion extraction.
+- [x] Add `music-recommender-profile-extract` CLI and `pyproject.toml` entry point.
+- [x] Fix S3 recommender loading to read promoted `dt=<date>` datasets by `source_run_id`, with legacy `run_id=<run_id>` fallback.
+- [x] Add S3 data readiness support through `check_s3_recommender_data` and `music-recommender-demo-readiness check-s3-data`.
+- [ ] Add DynamoDB runtime stores.
+- [ ] Update SAM infrastructure for all runtime stores.
+- [ ] Add deployment helper scripts.
+- [x] Update README and data extraction docs for profile extraction and S3 reader behavior.
+- [ ] Perform manual AWS S3 extraction/deploy validation.
+
 ## Tests
 
 - Unit: `tests/test_profile_sync.py` should prove the existing API sync payload and cache remain backward compatible after normalization refactor.

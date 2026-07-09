@@ -11,6 +11,7 @@ from music_recommender.recommender.catalog import load_recommender_catalog_from_
 from music_recommender.recommender.data import (
     MissingRecommenderDataError,
     check_local_recommender_data,
+    check_s3_recommender_data,
     read_dataset_records,
 )
 
@@ -213,6 +214,90 @@ def test_load_recommender_catalog_from_run_supports_s3_medallion_partitions() ->
     assert track.audio_features.valence == 0.93
     assert track.interaction_count == 1
     assert track.max_implicit_rating == 4.2
+
+
+def test_load_recommender_catalog_from_run_reads_s3_dt_partitions_by_source_run_id() -> None:
+    fake_s3 = FakeS3Client()
+    fake_s3.add_parquet(
+        "bucket",
+        "silver/tracks/dt=2026-07-09/part-000.parquet",
+        [
+            {
+                "spotify_track_id": "target-track",
+                "track_name": "Profile Signal",
+                "artist_names": ["Target Artist"],
+                "primary_artist_name": "Target Artist",
+                "source_run_id": "catalog-run",
+            },
+            {
+                "spotify_track_id": "other-track",
+                "track_name": "Wrong Run",
+                "artist_names": ["Other Artist"],
+                "primary_artist_name": "Other Artist",
+                "source_run_id": "other-run",
+            },
+        ],
+    )
+    fake_s3.add_parquet(
+        "bucket",
+        "silver/audio_features/dt=2026-07-09/part-000.parquet",
+        [
+            {"spotify_track_id": "target-track", "valence": 0.91, "source_run_id": "catalog-run"},
+            {"spotify_track_id": "other-track", "valence": 0.1, "source_run_id": "other-run"},
+        ],
+    )
+    fake_s3.add_parquet(
+        "bucket",
+        "gold/catalog_user_track_interactions/dt=2026-07-09/part-000.parquet",
+        [
+            {"item_id": "target-track", "implicit_rating": 3.5, "source_run_id": "network-run"},
+            {"item_id": "other-track", "implicit_rating": 5.0, "source_run_id": "other-run"},
+        ],
+    )
+
+    catalog = load_recommender_catalog_from_run(
+        "s3://bucket",
+        catalog_run_id="catalog-run",
+        interaction_run_id="network-run",
+        s3_client=fake_s3,
+    )
+
+    assert tuple(track.id for track in catalog.tracks) == ("target-track",)
+    track = catalog.by_track_id["target-track"]
+    assert track.audio_features is not None
+    assert track.audio_features.valence == 0.91
+    assert track.interaction_count == 1
+    assert track.max_implicit_rating == 3.5
+
+
+def test_check_s3_recommender_data_filters_required_datasets_by_source_run_id() -> None:
+    fake_s3 = FakeS3Client()
+    fake_s3.add_parquet(
+        "bucket",
+        "silver/tracks/dt=2026-07-09/part-000.parquet",
+        [
+            {"spotify_track_id": "target-track", "source_run_id": "catalog-run"},
+            {"spotify_track_id": "other-track", "source_run_id": "other-run"},
+        ],
+    )
+    fake_s3.add_parquet(
+        "bucket",
+        "silver/audio_features/dt=2026-07-09/part-000.parquet",
+        [
+            {"spotify_track_id": "target-track", "source_run_id": "catalog-run"},
+            {"spotify_track_id": "other-track", "source_run_id": "other-run"},
+        ],
+    )
+
+    summary = check_s3_recommender_data(
+        "s3://bucket",
+        run_id="catalog-run",
+        s3_client=fake_s3,
+    )
+
+    assert summary.ready is True
+    assert summary.datasets["silver/tracks"].row_count == 1
+    assert summary.datasets["silver/audio_features"].row_count == 1
 
 
 def test_read_dataset_records_supports_s3_parquet_and_jsonl() -> None:

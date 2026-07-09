@@ -66,6 +66,37 @@ ENABLE_SPOTIFY_AUDIO_FEATURES=true uv run music-recommender-extract \
   --enable-audio-features
 ```
 
+## Spotify Profile Extraction
+
+The seed catalog extraction path above builds the reusable catalog. To extract the authenticated
+Spotify user's profile signals into the same local/S3 medallion lake, use the user OAuth refresh
+token flow first, then run:
+
+```bash
+uv run music-recommender-profile-extract \
+  --output local \
+  --file-format parquet \
+  --top-time-ranges short_term medium_term long_term \
+  --top-limit 20 \
+  --saved-limit 50 \
+  --include-playlists \
+  --playlist-limit 10 \
+  --playlist-track-limit 100
+```
+
+For S3 output:
+
+```bash
+uv run music-recommender-profile-extract \
+  --output s3 \
+  --file-format parquet \
+  --bucket "$MUSIC_RECOMMENDER_BUCKET" \
+  --include-playlists
+```
+
+Profile extraction writes non-secret saved-track, top-item, playlist, and optional recently-played
+signals. It does not store Spotify access tokens, refresh tokens, or email.
+
 ## Lyrics NLP
 
 Lyrics NLP is optional because it downloads/loads local models.
@@ -140,6 +171,14 @@ Validate the local extracted catalog inputs:
 uv run music-recommender-demo-readiness check-data \
   --data-root data/local \
   --run-id smoke-reccobeats-parquet
+```
+
+Validate catalog inputs in S3:
+
+```bash
+uv run music-recommender-demo-readiness check-s3-data \
+  --bucket "$MUSIC_RECOMMENDER_BUCKET" \
+  --catalog-run-id <catalog-run-id>
 ```
 
 Validate that the configured refresh token can produce a new user access token without printing the

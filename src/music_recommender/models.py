@@ -327,6 +327,47 @@ class LinkedListenRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class SpotifyProfileTrackSignalRecord:
+    spotify_user_id: str
+    spotify_account_id: str | None
+    spotify_track_id: str
+    track_name: str
+    artist_names: list[str]
+    primary_artist_name: str | None
+    signal_source: str
+    weight: float
+    source_run_id: str
+    time_range: str | None = None
+    playlist_id: str | None = None
+    playlist_name: str | None = None
+    spotify_url: str | None = None
+    popularity: int | None = None
+    explicit: bool | None = None
+    duration_ms: int | None = None
+    isrc: str | None = None
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SpotifyProfileArtistSignalRecord:
+    spotify_user_id: str
+    spotify_account_id: str | None
+    artist_name: str
+    signal_source: str
+    weight: float
+    source_run_id: str
+    spotify_artist_id: str | None = None
+    time_range: str | None = None
+    playlist_id: str | None = None
+    playlist_name: str | None = None
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+
 @dataclass
 class ExtractionSummary:
     run_id: str

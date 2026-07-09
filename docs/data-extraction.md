@@ -23,6 +23,12 @@ s3://<bucket>/
     reccobeats/audio_features/run_id=<run_id>/part-000.parquet
     lyrics/lrclib/run_id=<run_id>/part-000.parquet
     lyrics/lyrics_ovh/run_id=<run_id>/part-000.parquet
+    spotify/user_profile/run_id=<run_id>/part-000.parquet
+    spotify/saved_tracks/run_id=<run_id>/part-000.parquet
+    spotify/top_tracks/run_id=<run_id>/part-000.parquet
+    spotify/top_artists/run_id=<run_id>/part-000.parquet
+    spotify/playlists/run_id=<run_id>/part-000.parquet
+    spotify/playlist_tracks/run_id=<run_id>/part-000.parquet
     network/listenbrainz/run_id=<run_id>/part-000.parquet
   silver/
     artists/dt=<yyyy-mm-dd>/part-000.parquet
@@ -31,9 +37,12 @@ s3://<bucket>/
     audio_features/dt=<yyyy-mm-dd>/part-000.parquet
     lyrics_clean/dt=<yyyy-mm-dd>/part-000.parquet
     lyrics_nlp/dt=<yyyy-mm-dd>/part-000.parquet
+    user_profile_track_signals/dt=<yyyy-mm-dd>/part-000.parquet
+    user_profile_artist_signals/dt=<yyyy-mm-dd>/part-000.parquet
     network/listens/dt=<yyyy-mm-dd>/part-000.parquet
   gold/
     user_track_interactions/dt=<yyyy-mm-dd>/part-000.parquet
+    user_profile_track_interactions/dt=<yyyy-mm-dd>/part-000.parquet
   metadata/
     runs/run_id=<run_id>.json
 ```
@@ -50,6 +59,11 @@ tables. Run metadata intentionally remains JSON at `metadata/runs/run_id=<run_id
 - Use `--output local` to save data locally under `data/local/<run_id>/`.
 - Use `--output s3` to upload the same medallion layout to S3.
 - Use `--log-level DEBUG` to show detailed progress while a run is active.
+- Recommender S3 reads support promoted `silver`/`gold` datasets partitioned by
+  `dt=<yyyy-mm-dd>` and filter rows by `source_run_id`. Legacy `run_id=<run_id>` S3 partitions are
+  still accepted as a fallback.
+- Authenticated Spotify profile extraction writes only whitelisted profile, track, artist, and
+  playlist fields. OAuth tokens and email are intentionally excluded.
 
 ## Source Notes
 

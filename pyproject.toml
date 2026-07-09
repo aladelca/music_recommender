@@ -23,6 +23,7 @@ music-recommender-network = "music_recommender.network_cli:main"
 music-recommender-demo-readiness = "music_recommender.demo_readiness_cli:main"
 music-recommender-agent = "music_recommender.agent_cli:main"
 music-recommender-api = "music_recommender.api_cli:main"
+music-recommender-profile-extract = "music_recommender.profile_cli:main"
 
 [project.optional-dependencies]
 nlp = [

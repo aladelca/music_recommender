@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 
 from music_recommender.config import Settings, load_settings
 from music_recommender.models import JsonDict
-from music_recommender.recommender.data import check_local_recommender_data
+from music_recommender.recommender.data import (
+    check_local_recommender_data,
+    check_s3_recommender_data,
+)
 from music_recommender.sources.spotify_user import (
     SpotifyUserClient,
     TopItemType,
@@ -68,6 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
     check_data.add_argument("--data-root", type=Path, default=None)
     check_data.add_argument("--run-id", default=None)
 
+    check_s3_data = subparsers.add_parser(
+        "check-s3-data",
+        help="Read S3 recommender Parquet outputs for a run.",
+    )
+    check_s3_data.add_argument("--data-root", default=None)
+    check_s3_data.add_argument("--bucket", default=None)
+    check_s3_data.add_argument("--run-id", "--catalog-run-id", dest="run_id", required=True)
+    check_s3_data.add_argument("--profile-run-id", default=None)
+
     auth_url = subparsers.add_parser("auth-url", help="Print the Spotify OAuth URL.")
     auth_url.add_argument("--state", default=None)
 
@@ -104,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     command = str(args.command)
     if command == "check-data":
         return _check_data(args)
+    if command == "check-s3-data":
+        return _check_s3_data(args)
     if command == "auth-url":
         return _auth_url(args)
     if command == "exchange-code":
@@ -120,6 +134,44 @@ def _check_data(args: argparse.Namespace) -> int:
     summary = check_local_recommender_data(data_root, run_id=args.run_id)
     print(json.dumps(summary.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def _check_s3_data(args: argparse.Namespace) -> int:
+    bucket = args.bucket or os.getenv("MUSIC_RECOMMENDER_BUCKET")
+    data_root = args.data_root or (f"s3://{bucket}" if bucket else None)
+    if data_root is None:
+        raise SystemExit("--data-root, --bucket, or MUSIC_RECOMMENDER_BUCKET is required")
+    payload = _s3_data_check_payload(
+        str(data_root),
+        catalog_run_id=str(args.run_id),
+        profile_run_id=_optional_str(args.profile_run_id),
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _s3_data_check_payload(
+    data_root: str,
+    *,
+    catalog_run_id: str,
+    profile_run_id: str | None = None,
+) -> JsonDict:
+    catalog_summary = check_s3_recommender_data(data_root, run_id=catalog_run_id)
+    if profile_run_id is None:
+        return catalog_summary.to_dict()
+    profile_summary = check_s3_recommender_data(
+        data_root,
+        run_id=profile_run_id,
+        required_datasets=(
+            "silver/user_profile_track_signals",
+            "silver/user_profile_artist_signals",
+            "gold/user_profile_track_interactions",
+        ),
+    )
+    return {
+        "catalog": catalog_summary.to_dict(),
+        "profile": profile_summary.to_dict(),
+    }
 
 
 def _auth_url(args: argparse.Namespace) -> int:
@@ -261,6 +313,12 @@ def _profile_required_scopes(
 def _item_count(payload: JsonDict) -> int:
     items = payload.get("items", [])
     return len(items) if isinstance(items, list) else 0
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 def _build_user_client(settings: Settings) -> SpotifyUserClient:

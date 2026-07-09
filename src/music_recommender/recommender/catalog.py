@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from music_recommender.models import JsonDict
-from music_recommender.recommender.data import MissingRecommenderDataError, read_dataset_records
+from music_recommender.recommender.data import (
+    MissingRecommenderDataError,
+    read_dataset_records,
+    read_s3_records_for_run,
+)
 from music_recommender.recommender.models import AudioFeatures, CatalogTrack, RecommenderCatalog
 
 DataMode = Literal["local", "s3"]
@@ -21,41 +25,41 @@ def load_recommender_catalog_from_run(
     s3_client: Any | None = None,
 ) -> RecommenderCatalog:
     mode = data_mode or ("s3" if _is_s3_location(data_root) else "local")
-    tracks = _required_records(
-        _dataset_location(
-            data_root, run_id=catalog_run_id, layer="silver", dataset="tracks", mode=mode
-        ),
+    tracks = _records_for_run(
+        data_root,
+        run_id=catalog_run_id,
+        layer="silver",
+        dataset="tracks",
+        mode=mode,
+        required=True,
         s3_client=s3_client,
     )
-    audio_features = _required_records(
-        _dataset_location(
-            data_root,
-            run_id=catalog_run_id,
-            layer="silver",
-            dataset="audio_features",
-            mode=mode,
-        ),
+    audio_features = _records_for_run(
+        data_root,
+        run_id=catalog_run_id,
+        layer="silver",
+        dataset="audio_features",
+        mode=mode,
+        required=True,
         s3_client=s3_client,
     )
-    lyrics_nlp = _optional_records(
-        _dataset_location(
-            data_root,
-            run_id=catalog_run_id,
-            layer="silver",
-            dataset="lyrics_nlp",
-            mode=mode,
-        ),
+    lyrics_nlp = _records_for_run(
+        data_root,
+        run_id=catalog_run_id,
+        layer="silver",
+        dataset="lyrics_nlp",
+        mode=mode,
+        required=False,
         s3_client=s3_client,
     )
     interactions = (
-        _optional_records(
-            _dataset_location(
-                data_root,
-                run_id=interaction_run_id,
-                layer="gold",
-                dataset="catalog_user_track_interactions",
-                mode=mode,
-            ),
+        _records_for_run(
+            data_root,
+            run_id=interaction_run_id,
+            layer="gold",
+            dataset="catalog_user_track_interactions",
+            mode=mode,
+            required=False,
             s3_client=s3_client,
         )
         if interaction_run_id is not None
@@ -94,6 +98,35 @@ def _required_records(location: DatasetLocation, *, s3_client: Any | None = None
     if not path.exists():
         raise MissingRecommenderDataError(f"Missing required recommender dataset: {path}")
     return read_dataset_records(path)
+
+
+def _records_for_run(
+    data_root: Path | str,
+    *,
+    run_id: str,
+    layer: str,
+    dataset: str,
+    mode: DataMode,
+    required: bool,
+    s3_client: Any | None = None,
+) -> list[JsonDict]:
+    if mode == "s3":
+        location = f"{str(data_root).rstrip('/')}/{layer}/{dataset}"
+        records = read_s3_records_for_run(location, run_id=run_id, s3_client=s3_client)
+        if records or not required:
+            return records
+        raise MissingRecommenderDataError(f"Missing required recommender dataset: {location}")
+
+    dataset_location = _dataset_location(
+        data_root,
+        run_id=run_id,
+        layer=layer,
+        dataset=dataset,
+        mode=mode,
+    )
+    if required:
+        return _required_records(dataset_location, s3_client=s3_client)
+    return _optional_records(dataset_location, s3_client=s3_client)
 
 
 def catalog_from_records(

@@ -6,6 +6,7 @@ from music_recommender.config import Settings
 from music_recommender.demo_readiness_cli import (
     _live_profile_check_payload,
     _profile_required_scopes,
+    _s3_data_check_payload,
 )
 
 
@@ -43,6 +44,57 @@ def test_live_profile_check_payload_uses_redacted_spotify_samples() -> None:
         "top_track_sample_count": 1,
         "user_id": "12175364859",
     }
+
+
+def test_s3_data_check_payload_includes_profile_summary_when_requested(
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_check_s3_recommender_data(
+        data_root: str,
+        *,
+        run_id: str,
+        required_datasets: tuple[str, ...] = ("silver/tracks", "silver/audio_features"),
+    ) -> FakeReadiness:
+        calls.append(
+            {
+                "data_root": data_root,
+                "run_id": run_id,
+                "required_datasets": required_datasets,
+            }
+        )
+        return FakeReadiness(root=data_root, run_id=run_id, datasets=required_datasets)
+
+    monkeypatch.setattr(
+        "music_recommender.demo_readiness_cli.check_s3_recommender_data",
+        fake_check_s3_recommender_data,
+    )
+
+    payload = _s3_data_check_payload(
+        "s3://bucket",
+        catalog_run_id="catalog-run",
+        profile_run_id="profile-run",
+    )
+
+    assert payload["catalog"]["run_id"] == "catalog-run"
+    assert payload["profile"]["run_id"] == "profile-run"
+    assert calls == [
+        {
+            "data_root": "s3://bucket",
+            "run_id": "catalog-run",
+            "required_datasets": ("silver/tracks", "silver/audio_features"),
+        },
+        {
+            "data_root": "s3://bucket",
+            "run_id": "profile-run",
+            "required_datasets": (
+                "silver/user_profile_track_signals",
+                "silver/user_profile_artist_signals",
+                "gold/user_profile_track_interactions",
+            ),
+        },
+    ]
 
 
 class FakeSpotifyUserClient:
@@ -97,6 +149,21 @@ class FakeSpotifyUserClient:
     ) -> dict[str, Any]:
         assert limit == 2
         return {"items": [{"track": {"id": "recent-1"}}]}
+
+
+class FakeReadiness:
+    def __init__(self, *, root: str, run_id: str, datasets: tuple[str, ...]) -> None:
+        self.root = root
+        self.run_id = run_id
+        self.datasets = datasets
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "root": self.root,
+            "run_id": self.run_id,
+            "ready": True,
+            "datasets": {dataset: {"row_count": 1} for dataset in self.datasets},
+        }
 
 
 def build_settings() -> Settings:

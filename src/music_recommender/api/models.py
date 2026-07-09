@@ -15,10 +15,15 @@ class ConfigPresence(BaseModel):
     aws_region: str
     api_key_required: bool
     aws_secrets_prefix_present: bool
+    dynamodb_feedback_table_present: bool
+    dynamodb_playlists_table_present: bool
+    dynamodb_sessions_table_present: bool
+    dynamodb_users_table_present: bool
     music_recommender_bucket_present: bool
     openai_api_key_present: bool
     recommender_data_mode: str
     recommender_data_root_present: bool
+    runtime_store_backend: str
     spotify_client_id_present: bool
     spotify_client_secret_present: bool
     spotify_user_refresh_token_present: bool

@@ -11,6 +11,7 @@ AudioFeatureSource = Literal["none", "reccobeats", "spotify"]
 RecommenderDataMode = Literal["local", "s3"]
 RecommenderDataRoot = Path | str
 OutputFileFormat = Literal["jsonl", "parquet"]
+RuntimeStoreBackend = Literal["auto", "local", "dynamodb"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,11 @@ class Settings:
     recommender_data_mode: RecommenderDataMode
     recommender_demo_user_id: str | None
     aws_secrets_prefix: str | None
+    runtime_store_backend: RuntimeStoreBackend = "auto"
+    users_table_name: str | None = None
+    sessions_table_name: str | None = None
+    feedback_table_name: str | None = None
+    playlists_table_name: str | None = None
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -182,4 +188,13 @@ def load_settings(env_file: Path | str = ".env", *, require_bucket: bool = False
         recommender_data_mode=_get_choice("RECOMMENDER_DATA_MODE", "local", {"local", "s3"}),
         recommender_demo_user_id=_get_optional_str("RECOMMENDER_DEMO_USER_ID"),
         aws_secrets_prefix=_get_optional_str("AWS_SECRETS_PREFIX"),
+        runtime_store_backend=_get_choice(
+            "RUNTIME_STORE_BACKEND",
+            "auto",
+            {"auto", "local", "dynamodb"},
+        ),
+        users_table_name=_get_optional_str("USERS_TABLE_NAME"),
+        sessions_table_name=_get_optional_str("SESSIONS_TABLE_NAME"),
+        feedback_table_name=_get_optional_str("FEEDBACK_TABLE_NAME"),
+        playlists_table_name=_get_optional_str("PLAYLISTS_TABLE_NAME"),
     )

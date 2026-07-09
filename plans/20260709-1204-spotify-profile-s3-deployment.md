@@ -188,6 +188,28 @@
    - Deploy the SAM stack.
    - Confirm API Gateway output and smoke-test live routes with redacted responses.
 
+## Implementation Progress
+
+- [x] Factor profile normalization out of `SpotifyProfileSyncService.sync_profile`.
+- [x] Implement `src/music_recommender/pipeline/profile.py` for local/S3 Spotify profile medallion extraction.
+- [x] Add `music-recommender-profile-extract` CLI and `pyproject.toml` entry point.
+- [x] Fix S3 recommender loading to read promoted `dt=<date>` datasets by `source_run_id`, with legacy `run_id=<run_id>` fallback.
+- [x] Add S3 data readiness support through `check_s3_recommender_data` and `music-recommender-demo-readiness check-s3-data`.
+- [x] Add DynamoDB runtime stores.
+- [x] Update SAM infrastructure for all runtime stores.
+- [x] Add deployment helper scripts.
+- [x] Update README and data extraction docs for profile extraction and S3 reader behavior.
+- [x] Perform manual AWS S3 extraction validation.
+- [ ] Perform manual API SAM deployment smoke validation.
+
+## Manual AWS Validation Notes
+
+- S3 catalog upload succeeded for bucket `music-recommender-571600852509-us-east-1` and catalog run `20260522052343-7123c483`.
+- Spotify profile extraction to S3 succeeded for profile run `profile-20260709-live-smoke`, writing the required profile signal and interaction datasets.
+- `music-recommender-demo-readiness check-s3-data` returned ready for both the catalog and profile datasets.
+- `aws cloudformation validate-template --template-body file://infra/template.yaml` succeeded.
+- API deployment smoke validation was not run because the local `sam` CLI is not installed and Secrets Manager does not yet contain `music-recommender/demo/runtime`.
+
 ## Tests
 
 - Unit: `tests/test_profile_sync.py` should prove the existing API sync payload and cache remain backward compatible after normalization refactor.

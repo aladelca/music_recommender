@@ -9,6 +9,19 @@ from typing import Any, Protocol
 
 from music_recommender.models import JsonDict
 from music_recommender.recommender.models import UserTasteProfile
+from music_recommender.recommender.profile_normalization import (
+    apply_profile_track_signal,
+    empty_profile_source_counts,
+    normalize_spotify_track,
+    optional_int,
+    optional_str,
+    playlist_owner_id,
+    profile_top_weight,
+    selected_profile_playlists,
+    spotify_artist_names,
+    spotify_items,
+    spotify_url,
+)
 from music_recommender.sources.http import ApiError
 from music_recommender.sources.spotify_user import TopItemType, TopTimeRange
 
@@ -104,12 +117,18 @@ class JsonProfileCache:
         self.path.write_text(json.dumps(snapshot.to_dict(), indent=2, sort_keys=True))
 
 
+class ProfileCache(Protocol):
+    def load(self) -> ProfileSnapshot | None: ...
+
+    def save(self, snapshot: ProfileSnapshot) -> None: ...
+
+
 class SpotifyProfileSyncService:
     def __init__(
         self,
         *,
         spotify_client: SpotifyProfileClient,
-        cache: JsonProfileCache,
+        cache: ProfileCache,
         required_user_id: str | None = None,
     ) -> None:
         self.spotify_client = spotify_client
@@ -391,11 +410,12 @@ def _snapshot_from_payload(payload: JsonDict) -> ProfileSnapshot:
     )
 
 
+def profile_snapshot_from_dict(payload: JsonDict) -> ProfileSnapshot:
+    return _snapshot_from_payload(payload)
+
+
 def _items(payload: JsonDict) -> list[JsonDict]:
-    items = payload.get("items", [])
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
+    return spotify_items(payload)
 
 
 def _append_track_candidate(candidates: list[JsonDict], track: JsonDict) -> None:
@@ -408,20 +428,10 @@ def _append_track_candidate(candidates: list[JsonDict], track: JsonDict) -> None
 
 
 def _track_candidate_from_spotify_track(track: JsonDict) -> JsonDict | None:
-    track_id = _optional_str(track.get("id"))
-    if track_id is None:
+    normalized = normalize_spotify_track(track)
+    if normalized is None:
         return None
-    artist_names = _artist_names([track])
-    primary_artist_name = artist_names[0] if artist_names else None
-    return {
-        "id": track_id,
-        "name": _optional_str(track.get("name")) or track_id,
-        "artist_names": artist_names,
-        "primary_artist_name": primary_artist_name,
-        "explicit": bool(track.get("explicit") or False),
-        "popularity": _optional_int(track.get("popularity")),
-        "spotify_url": _spotify_url(track),
-    }
+    return normalized.candidate()
 
 
 def _track_candidates_from_payload(value: Any) -> tuple[JsonDict, ...]:
@@ -458,10 +468,7 @@ def _track_candidate_from_payload(payload: JsonDict) -> JsonDict | None:
 
 
 def _spotify_url(track: JsonDict) -> str | None:
-    external_urls = track.get("external_urls")
-    if not isinstance(external_urls, dict):
-        return None
-    return _optional_str(external_urls.get("spotify"))
+    return spotify_url(track)
 
 
 def _track_ids(tracks: list[JsonDict]) -> list[str]:
@@ -471,14 +478,7 @@ def _track_ids(tracks: list[JsonDict]) -> list[str]:
 def _artist_names(tracks: list[JsonDict]) -> list[str]:
     names: list[str] = []
     for track in tracks:
-        artists = track.get("artists", [])
-        if not isinstance(artists, list):
-            continue
-        names.extend(
-            str(artist["name"])
-            for artist in artists
-            if isinstance(artist, dict) and artist.get("name")
-        )
+        names.extend(spotify_artist_names(track))
     return names
 
 
@@ -498,14 +498,7 @@ def _unique(values: list[str]) -> tuple[str, ...]:
 
 
 def _empty_source_counts() -> dict[str, int]:
-    return {
-        "saved_tracks": 0,
-        "top_tracks": 0,
-        "top_artists": 0,
-        "playlists": 0,
-        "playlist_tracks": 0,
-        "recent_tracks": 0,
-    }
+    return empty_profile_source_counts()
 
 
 def _add_track_signal(
@@ -520,16 +513,17 @@ def _add_track_signal(
     artist_weight: float,
     liked: bool,
 ) -> None:
-    track_id = _optional_str(track.get("id"))
-    if track_id is not None:
-        _append_unique(known_track_ids, track_id)
-        _set_max(track_affinity, track_id, track_weight)
-        if liked:
-            _append_unique(liked_track_ids, track_id)
-    for artist_name in _artist_names([track]):
-        if liked:
-            _append_unique(liked_artist_names, artist_name)
-        _set_max(artist_affinity, artist_name, artist_weight)
+    apply_profile_track_signal(
+        track,
+        liked_track_ids=liked_track_ids,
+        known_track_ids=known_track_ids,
+        liked_artist_names=liked_artist_names,
+        track_affinity=track_affinity,
+        artist_affinity=artist_affinity,
+        track_weight=track_weight,
+        artist_weight=artist_weight,
+        liked=liked,
+    )
 
 
 def _append_unique(values: list[str], value: str) -> None:
@@ -542,35 +536,18 @@ def _set_max(values: dict[str, float], key: str, value: float) -> None:
 
 
 def _top_weight(time_range: str) -> float:
-    return {
-        "short_term": 0.9,
-        "medium_term": 0.8,
-        "long_term": 0.7,
-    }.get(time_range, 0.8)
+    return profile_top_weight(time_range)
 
 
 def _selected_playlists(
     playlists: list[JsonDict],
     playlist_ids: tuple[str, ...],
 ) -> list[JsonDict]:
-    if not playlist_ids:
-        return playlists
-    by_id = {
-        str(playlist["id"]): playlist
-        for playlist in playlists
-        if _optional_str(playlist.get("id")) is not None
-    }
-    return [
-        by_id.get(playlist_id, {"id": playlist_id, "name": None, "owner": {}})
-        for playlist_id in playlist_ids
-    ]
+    return selected_profile_playlists(playlists, playlist_ids)
 
 
 def _playlist_owner_id(playlist: JsonDict) -> str | None:
-    owner = playlist.get("owner")
-    if not isinstance(owner, dict):
-        return None
-    return _optional_str(owner.get("id"))
+    return playlist_owner_id(playlist)
 
 
 def _string_list(value: Any) -> list[str]:
@@ -584,9 +561,7 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)
+    return optional_str(value)
 
 
 def _float_mapping_or_none(value: Any) -> dict[str, float] | None:
@@ -605,9 +580,4 @@ def _int_mapping(value: Any) -> dict[str, int]:
 
 
 def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return optional_int(value)

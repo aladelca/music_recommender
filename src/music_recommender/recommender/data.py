@@ -80,6 +80,29 @@ def check_local_recommender_data(
     raise MissingRecommenderDataError(f"No local recommender runs found under {root}")
 
 
+def check_s3_recommender_data(
+    data_root: str,
+    *,
+    run_id: str,
+    required_datasets: tuple[str, ...] = REQUIRED_READINESS_DATASETS,
+    s3_client: Any | None = None,
+) -> RecommenderDataReadiness:
+    root = data_root.rstrip("/")
+    if not root.startswith("s3://"):
+        raise ValueError(f"S3 data root must start with s3://: {data_root}")
+
+    datasets = {
+        dataset: _summarize_s3_dataset(
+            root=root,
+            dataset=dataset,
+            run_id=run_id,
+            s3_client=s3_client,
+        )
+        for dataset in required_datasets
+    }
+    return RecommenderDataReadiness(root=root, run_id=run_id, datasets=datasets)
+
+
 def read_dataset_records(
     location: Path | str,
     *,
@@ -93,6 +116,25 @@ def read_dataset_records(
     for data_file in _data_files(Path(location)):
         records.extend(_read_data_file(data_file))
     return records
+
+
+def read_s3_records_for_run(
+    location: str,
+    *,
+    run_id: str,
+    s3_client: Any | None = None,
+) -> list[JsonDict]:
+    promoted_records = read_dataset_records(location, s3_client=s3_client)
+    filtered_records = filter_records_by_source_run_id(promoted_records, run_id)
+    if filtered_records:
+        return filtered_records
+
+    legacy_location = f"{location.rstrip('/')}/run_id={run_id}"
+    return read_dataset_records(legacy_location, s3_client=s3_client)
+
+
+def filter_records_by_source_run_id(records: list[JsonDict], run_id: str) -> list[JsonDict]:
+    return [record for record in records if _optional_str(record.get("source_run_id")) == run_id]
 
 
 def _check_run(
@@ -128,6 +170,25 @@ def _summarize_dataset(*, run_root: Path, dataset: str) -> DatasetReadiness:
         path=str(dataset_path),
         file_count=len(files),
         row_count=sum(_row_count(file) for file in files),
+    )
+
+
+def _summarize_s3_dataset(
+    *,
+    root: str,
+    dataset: str,
+    run_id: str,
+    s3_client: Any | None,
+) -> DatasetReadiness:
+    location = f"{root}/{dataset}"
+    records = read_s3_records_for_run(location, run_id=run_id, s3_client=s3_client)
+    if not records:
+        raise MissingRecommenderDataError(f"Missing required recommender dataset: {location}")
+    return DatasetReadiness(
+        dataset=dataset,
+        path=location,
+        file_count=_s3_file_count(location, s3_client=s3_client),
+        row_count=len(records),
     )
 
 
@@ -202,6 +263,20 @@ def _s3_data_keys(client: Any, *, bucket: str, prefix: str) -> list[str]:
     return sorted(keys)
 
 
+def _s3_file_count(location: str, *, s3_client: Any | None) -> int:
+    parsed = urlparse(location)
+    if parsed.scheme != "s3" or not parsed.netloc:
+        raise ValueError(f"Invalid S3 dataset location: {location}")
+    client = s3_client or _default_s3_client()
+    return len(
+        _s3_data_keys(
+            client,
+            bucket=parsed.netloc,
+            prefix=_normalize_s3_prefix(parsed.path.lstrip("/")),
+        )
+    )
+
+
 def _jsonl_bytes_records(body: bytes) -> list[JsonDict]:
     rows: list[JsonDict] = []
     for line in body.decode("utf-8").splitlines():
@@ -222,6 +297,12 @@ def _default_s3_client() -> Any:
     import boto3
 
     return boto3.client("s3")
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 def _jsonl_row_count(path: Path) -> int:

@@ -304,6 +304,15 @@ key, OAuth token, Spotify profile payload, or runtime secret.
 See [docs/operational-aws-runbook.md](docs/operational-aws-runbook.md) for monitoring, secret
 rotation, data-run updates, retained DynamoDB tables, costs, and rollback procedures.
 
+## Runbooks
+
+- [Deployed API usage](docs/api-usage-runbook.md): secure authentication, profile sync,
+  recommendations, feedback, playlists, and error handling.
+- [AWS deployment architecture](docs/aws-deployment-architecture-runbook.md): live resources, data
+  flows, IAM boundaries, artifact contents, reliability, and known production gaps.
+- [Recommender scientific methodology](docs/recommender-methodology-runbook.md): profile signals,
+  implemented scoring equations, guardrails, reproducibility, evaluation, and limitations.
+
 ## Validation
 
 ```bash

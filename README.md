@@ -178,7 +178,15 @@ Validate catalog inputs in S3:
 ```bash
 uv run music-recommender-demo-readiness check-s3-data \
   --bucket "$MUSIC_RECOMMENDER_BUCKET" \
-  --catalog-run-id <catalog-run-id>
+  --catalog-run-id <catalog-run-id> \
+  --profile-run-id <profile-run-id>
+```
+
+Upload an existing local run to the S3 medallion root:
+
+```bash
+MUSIC_RECOMMENDER_BUCKET="$MUSIC_RECOMMENDER_BUCKET" \
+bash scripts/upload_local_run_to_s3.sh <catalog-run-id>
 ```
 
 Validate that the configured refresh token can produce a new user access token without printing the

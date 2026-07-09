@@ -99,12 +99,18 @@ class JsonPlaylistRecordStore:
         )
 
 
+class PlaylistRecordStore(Protocol):
+    def get(self, session_id: str) -> PlaylistRecord | None: ...
+
+    def put(self, record: PlaylistRecord) -> None: ...
+
+
 class PlaylistService:
     def __init__(
         self,
         *,
         spotify_client: SpotifyPlaylistClient,
-        store: JsonPlaylistRecordStore,
+        store: PlaylistRecordStore,
         user_id: str,
     ) -> None:
         self.spotify_client = spotify_client
@@ -165,6 +171,10 @@ def _playlist_record_from_payload(payload: dict[str, Any]) -> PlaylistRecord:
         snapshot_id=_optional_str(payload.get("snapshot_id")),
         partial_failures=tuple(str(item) for item in payload.get("partial_failures", [])),
     )
+
+
+def playlist_record_from_dict(payload: dict[str, Any]) -> PlaylistRecord:
+    return _playlist_record_from_payload(payload)
 
 
 def _playlist_url(payload: JsonDict) -> str | None:

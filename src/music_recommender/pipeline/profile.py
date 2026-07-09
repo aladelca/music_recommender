@@ -12,6 +12,21 @@ from music_recommender.models import (
     SpotifyProfileTrackSignalRecord,
     UserTrackInteractionRecord,
 )
+from music_recommender.recommender.profile_normalization import (
+    empty_profile_source_counts,
+    normalize_spotify_track,
+    optional_bool,
+    optional_int,
+    optional_str,
+    playlist_owner_id,
+    profile_top_weight,
+    selected_profile_playlists,
+    spotify_artist_names,
+    spotify_artists,
+    spotify_items,
+    spotify_url,
+    track_isrc,
+)
 from music_recommender.sources.http import ApiError
 from music_recommender.sources.spotify_user import TopItemType, TopTimeRange
 from music_recommender.storage.s3 import FileFormat, S3Storage, medallion_data_key, run_metadata_key
@@ -534,41 +549,37 @@ def _add_track_and_artist_signals(
     playlist_id: str | None = None,
     playlist_name: str | None = None,
 ) -> None:
-    track_id = _optional_str(track.get("id"))
-    if track_id is None:
+    normalized = normalize_spotify_track(track)
+    if normalized is None:
         return
-    artist_names = _artist_names(track)
     track_signals.add(
         SpotifyProfileTrackSignalRecord(
             spotify_user_id=spotify_user_id,
             spotify_account_id=spotify_account_id,
-            spotify_track_id=track_id,
-            track_name=_optional_str(track.get("name")) or track_id,
-            artist_names=artist_names,
-            primary_artist_name=artist_names[0] if artist_names else None,
+            spotify_track_id=normalized.spotify_track_id,
+            track_name=normalized.track_name,
+            artist_names=list(normalized.artist_names),
+            primary_artist_name=normalized.primary_artist_name,
             signal_source=signal_source,
             time_range=time_range,
             playlist_id=playlist_id,
             playlist_name=playlist_name,
             weight=track_weight,
             source_run_id=options.run_id,
-            spotify_url=_spotify_url(track),
-            popularity=_optional_int(track.get("popularity")),
-            explicit=_optional_bool(track.get("explicit")),
-            duration_ms=_optional_int(track.get("duration_ms")),
-            isrc=_track_isrc(track),
+            spotify_url=normalized.spotify_url,
+            popularity=normalized.popularity,
+            explicit=normalized.explicit,
+            duration_ms=normalized.duration_ms,
+            isrc=normalized.isrc,
         )
     )
-    for artist in _artists(track):
-        artist_name = _optional_str(artist.get("name"))
-        if artist_name is None:
-            continue
+    for artist in normalized.artists:
         artist_signals.add(
             SpotifyProfileArtistSignalRecord(
                 spotify_user_id=spotify_user_id,
                 spotify_account_id=spotify_account_id,
-                spotify_artist_id=_optional_str(artist.get("id")),
-                artist_name=artist_name,
+                spotify_artist_id=artist.spotify_artist_id,
+                artist_name=artist.artist_name,
                 signal_source=signal_source,
                 time_range=time_range,
                 playlist_id=playlist_id,
@@ -589,24 +600,41 @@ def _bronze_track_source_record(
     playlist_id: str | None = None,
     playlist_name: str | None = None,
 ) -> JsonDict:
-    track_id = _optional_str(track.get("id"))
+    normalized = normalize_spotify_track(track)
+    artist_names = list(normalized.artist_names) if normalized is not None else _artist_names(track)
     return {
         "run_id": options.run_id,
         "source": "spotify",
         "spotify_user_id": spotify_user_id,
-        "spotify_track_id": track_id,
-        "track_name": _optional_str(track.get("name")),
+        "spotify_track_id": (
+            normalized.spotify_track_id
+            if normalized is not None
+            else _optional_str(track.get("id"))
+        ),
+        "track_name": normalized.track_name
+        if normalized is not None
+        else _optional_str(track.get("name")),
         "artist_names": _artist_names(track),
-        "primary_artist_name": _artist_names(track)[0] if _artist_names(track) else None,
+        "primary_artist_name": artist_names[0] if artist_names else None,
         "signal_source": signal_source,
         "time_range": time_range,
         "playlist_id": playlist_id,
         "playlist_name": playlist_name,
-        "duration_ms": _optional_int(track.get("duration_ms")),
-        "explicit": _optional_bool(track.get("explicit")),
-        "popularity": _optional_int(track.get("popularity")),
-        "isrc": _track_isrc(track),
-        "spotify_url": _spotify_url(track),
+        "duration_ms": (
+            normalized.duration_ms
+            if normalized is not None
+            else _optional_int(track.get("duration_ms"))
+        ),
+        "explicit": normalized.explicit
+        if normalized is not None
+        else _optional_bool(track.get("explicit")),
+        "popularity": (
+            normalized.popularity
+            if normalized is not None
+            else _optional_int(track.get("popularity"))
+        ),
+        "isrc": normalized.isrc if normalized is not None else _track_isrc(track),
+        "spotify_url": normalized.spotify_url if normalized is not None else _spotify_url(track),
     }
 
 
@@ -622,98 +650,51 @@ def _safe_user_profile_record(current_user: JsonDict, run_id: str) -> JsonDict:
 
 
 def _items(payload: JsonDict) -> list[JsonDict]:
-    items = payload.get("items", [])
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
+    return spotify_items(payload)
 
 
 def _selected_playlists(
     playlists: list[JsonDict],
     playlist_ids: tuple[str, ...],
 ) -> list[JsonDict]:
-    if not playlist_ids:
-        return playlists
-    by_id = {
-        str(playlist["id"]): playlist
-        for playlist in playlists
-        if _optional_str(playlist.get("id")) is not None
-    }
-    return [
-        by_id.get(playlist_id, {"id": playlist_id, "name": None, "owner": {}})
-        for playlist_id in playlist_ids
-    ]
+    return selected_profile_playlists(playlists, playlist_ids)
 
 
 def _playlist_owner_id(playlist: JsonDict) -> str | None:
-    owner = playlist.get("owner")
-    if not isinstance(owner, dict):
-        return None
-    return _optional_str(owner.get("id"))
+    return playlist_owner_id(playlist)
 
 
 def _artists(track: JsonDict) -> list[JsonDict]:
-    artists = track.get("artists", [])
-    if not isinstance(artists, list):
-        return []
-    return [artist for artist in artists if isinstance(artist, dict)]
+    return spotify_artists(track)
 
 
 def _artist_names(track: JsonDict) -> list[str]:
-    return [str(artist["name"]) for artist in _artists(track) if artist.get("name")]
+    return spotify_artist_names(track)
 
 
 def _spotify_url(track: JsonDict) -> str | None:
-    external_urls = track.get("external_urls")
-    if not isinstance(external_urls, dict):
-        return None
-    return _optional_str(external_urls.get("spotify"))
+    return spotify_url(track)
 
 
 def _track_isrc(track: JsonDict) -> str | None:
-    external_ids = track.get("external_ids")
-    if not isinstance(external_ids, dict):
-        return None
-    return _optional_str(external_ids.get("isrc"))
+    return track_isrc(track)
 
 
 def _top_weight(time_range: str) -> float:
-    return {
-        "short_term": 0.9,
-        "medium_term": 0.8,
-        "long_term": 0.7,
-    }.get(time_range, 0.8)
+    return profile_top_weight(time_range)
 
 
 def _empty_source_counts() -> dict[str, int]:
-    return {
-        "saved_tracks": 0,
-        "top_tracks": 0,
-        "top_artists": 0,
-        "playlists": 0,
-        "playlist_tracks": 0,
-        "recent_tracks": 0,
-    }
+    return empty_profile_source_counts()
 
 
 def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    return str(value)
+    return optional_str(value)
 
 
 def _optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    try:
-        if isinstance(value, int | float | str | bytes | bytearray):
-            return int(value)
-    except (TypeError, ValueError):
-        return None
-    return None
+    return optional_int(value)
 
 
 def _optional_bool(value: object) -> bool | None:
-    if value is None:
-        return None
-    return bool(value)
+    return optional_bool(value)

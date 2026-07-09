@@ -80,6 +80,17 @@ Resources:
         - AttributeName: event_key
           KeyType: RANGE
 
+  MusicRecommenderPlaylistsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+
   MusicRecommenderApiLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -109,6 +120,8 @@ Resources:
             Ref: DataBucketName
           OPENAI_AGENT_MODEL:
             Ref: OpenAIAgentModel
+          PLAYLISTS_TABLE_NAME:
+            Ref: MusicRecommenderPlaylistsTable
           PYTHONPATH: /var/task/src
           RECOMMENDER_API_KEY:
             Fn::Sub: "{{resolve:secretsmanager:${RuntimeSecretName}:SecretString:RECOMMENDER_API_KEY}}"
@@ -119,6 +132,7 @@ Resources:
             Fn::Sub: "s3://${DataBucketName}/${DataPrefix}"
           RECOMMENDER_INTERACTION_RUN_ID:
             Ref: InteractionRunId
+          RUNTIME_STORE_BACKEND: dynamodb
           SESSIONS_TABLE_NAME:
             Ref: MusicRecommenderSessionsTable
           SPOTIFY_APP_CLIENT_ID:
@@ -166,6 +180,9 @@ Resources:
                 - Fn::GetAtt:
                     - MusicRecommenderFeedbackTable
                     - Arn
+                - Fn::GetAtt:
+                    - MusicRecommenderPlaylistsTable
+                    - Arn
             - Effect: Allow
               Action:
                 - s3:GetObject
@@ -208,3 +225,7 @@ Outputs:
     Description: DynamoDB feedback table.
     Value:
       Ref: MusicRecommenderFeedbackTable
+  PlaylistsTableName:
+    Description: DynamoDB playlist idempotency table.
+    Value:
+      Ref: MusicRecommenderPlaylistsTable

@@ -17,6 +17,7 @@ def test_sam_template_defines_serverless_demo_stack() -> None:
     assert resource_types["MusicRecommenderUsersTable"] == "AWS::DynamoDB::Table"
     assert resource_types["MusicRecommenderSessionsTable"] == "AWS::DynamoDB::Table"
     assert resource_types["MusicRecommenderFeedbackTable"] == "AWS::DynamoDB::Table"
+    assert resource_types["MusicRecommenderPlaylistsTable"] == "AWS::DynamoDB::Table"
 
     function = resources["MusicRecommenderApiFunction"]["Properties"]
     assert function["Handler"] == "music_recommender.api.lambda_handler.handler"
@@ -31,6 +32,8 @@ def test_sam_template_defines_serverless_demo_stack() -> None:
     assert "SPOTIFY_APP_CLIENT_SECRET" in env
     assert "SPOTIFY_USER_REFRESH_TOKEN" in env
     assert "OPENAI_API_KEY" in env
+    assert env["RUNTIME_STORE_BACKEND"] == "dynamodb"
+    assert "PLAYLISTS_TABLE_NAME" in env
     assert "secretsmanager" in str(env["SPOTIFY_APP_CLIENT_SECRET"])
 
     policies = function["Policies"]
@@ -43,3 +46,4 @@ def test_sam_template_defines_serverless_demo_stack() -> None:
     outputs = template["Outputs"]
     assert "ApiUrl" in outputs
     assert "ApiFunctionName" in outputs
+    assert "PlaylistsTableName" in outputs

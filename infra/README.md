@@ -1,22 +1,15 @@
 # AWS Serverless Deployment
 
-This is the Phase 4 deployment foundation for the backend-only class demo. It deploys the FastAPI
-application through AWS Lambda and API Gateway, plus the demo DynamoDB tables and IAM permissions
-needed by later recommendation, playlist, profile, and feedback routes.
-
-The template is intentionally small and explainable. Phase 3 routes can be added to the same
-FastAPI app without changing the public API Gateway shape.
-
-Current runtime state still uses local JSON stores in the FastAPI service layer for sessions,
-profile cache, playlist records, and feedback events. The DynamoDB tables below are provisioned for
-the AWS follow-up adapter; do not treat the deployed API as durable across Lambda instances until
-those adapters are wired.
+This deploys the backend-only class demo through AWS Lambda and API Gateway. Extracted catalog and
+profile datasets live in S3; runtime API state uses DynamoDB for profile cache, recommendation
+sessions, playlist idempotency, and feedback events.
 
 ## Resources
 
 - API Gateway HTTP API
 - Lambda function running `music_recommender.api.lambda_handler.handler`
-- DynamoDB tables for demo users, recommendation sessions, and feedback events
+- DynamoDB tables for demo users/profile cache, recommendation sessions, playlist records, and
+  feedback events
 - S3 read permissions for extracted recommender data
 - Secrets Manager read permission scoped by `AWS_SECRETS_PREFIX`
 - CloudWatch log retention for the Lambda function
@@ -47,9 +40,11 @@ aws secretsmanager create-secret \
 From the repository root:
 
 ```bash
-uv export --format requirements-txt --no-hashes --output-file requirements.txt
-sam build --template-file infra/template.yaml
-sam deploy --guided --template-file .aws-sam/build/template.yaml
+STACK_NAME=music-recommender-demo \
+MUSIC_RECOMMENDER_BUCKET=<your-music-recommender-bucket> \
+CATALOG_RUN_ID=<catalog-run-id> \
+RUNTIME_SECRET_NAME=music-recommender/demo/runtime \
+bash scripts/deploy_api_sam.sh
 ```
 
 Suggested guided values:
@@ -70,6 +65,18 @@ After deployment, use the `ApiUrl` output:
 curl "$API_URL/health"
 curl -H "X-API-Key: $RECOMMENDER_API_KEY" "$API_URL/profile"
 ```
+
+## Upload Existing Local Runs
+
+When a local run is already present under `data/local/<run-id>/`, upload it to the bucket root:
+
+```bash
+MUSIC_RECOMMENDER_BUCKET=<your-music-recommender-bucket> \
+bash scripts/upload_local_run_to_s3.sh <catalog-run-id>
+```
+
+The recommender S3 reader expects promoted `silver` and `gold` datasets at the bucket root and
+filters rows by `source_run_id`.
 
 Remove the generated top-level `requirements.txt` after deployment if you do not intend to commit
 it. The source of truth for Python dependencies remains `pyproject.toml` and `uv.lock`.

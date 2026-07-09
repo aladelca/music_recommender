@@ -23,6 +23,7 @@ from music_recommender.recommender.models import CatalogTrack, RecommenderCatalo
 from music_recommender.recommender.playlists import JsonPlaylistRecordStore, PlaylistService
 from music_recommender.recommender.profile import (
     JsonProfileCache,
+    ProfileCache,
     ProfileSnapshot,
     SpotifyProfileSyncService,
 )
@@ -30,8 +31,15 @@ from music_recommender.recommender.sessions import (
     JsonRecommendationSessionStore,
     PlaylistResult,
     RecommendationSession,
+    RecommendationSessionStore,
 )
 from music_recommender.sources.spotify_user import SpotifyUserClient
+from music_recommender.storage.dynamodb import (
+    DynamoDBFeedbackStore,
+    DynamoDBPlaylistRecordStore,
+    DynamoDBProfileCache,
+    DynamoDBRecommendationSessionStore,
+)
 
 
 class DemoApiService:
@@ -39,8 +47,10 @@ class DemoApiService:
         self,
         *,
         settings_loader: Callable[[], Settings] = load_settings,
+        dynamodb_client_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.settings_loader = settings_loader
+        self.dynamodb_client_factory = dynamodb_client_factory
 
     def recommend(self, request: RecommendationRequest) -> JsonDict:
         settings = self._settings()
@@ -58,7 +68,7 @@ class DemoApiService:
             interaction_run_id=interaction_run_id,
             data_mode=settings.recommender_data_mode,
         )
-        cached_profile = JsonProfileCache(_state_path("RECOMMENDER_PROFILE_CACHE_PATH")).load()
+        cached_profile = self._profile_cache(settings).load()
         catalog = _catalog_with_spotify_candidates(catalog, cached_profile)
         profile = self._request_profile(settings, request, cached_profile=cached_profile)
         service = AgenticRecommendationService(
@@ -78,7 +88,7 @@ class DemoApiService:
             use_agent_orchestrator=request.use_openai_agent,
         )
         payload = response.to_dict()
-        JsonRecommendationSessionStore(_state_path("RECOMMENDER_SESSION_STORE_PATH")).put(
+        self._session_store(settings).put(
             _session_from_recommendation_payload(
                 payload,
                 user_id=profile.user_id,
@@ -90,9 +100,7 @@ class DemoApiService:
 
     def create_playlist(self, request: PlaylistCreateRequest) -> JsonDict:
         settings = self._settings()
-        session_store = JsonRecommendationSessionStore(
-            _state_path("RECOMMENDER_SESSION_STORE_PATH")
-        )
+        session_store = self._session_store(settings)
         session = session_store.get(request.session_id)
         if session is None:
             raise ApiNotFoundError(f"Recommendation session not found: {request.session_id}")
@@ -103,7 +111,7 @@ class DemoApiService:
             )
         playlist_service = PlaylistService(
             spotify_client=self._spotify_user_client(settings),
-            store=JsonPlaylistRecordStore(_state_path("RECOMMENDER_PLAYLIST_STORE_PATH")),
+            store=self._playlist_store(settings),
             user_id=settings.spotify_demo_user_id,
         )
         result = playlist_service.create_playlist(
@@ -129,9 +137,8 @@ class DemoApiService:
         return result.to_dict()
 
     def record_feedback(self, request: FeedbackRequest) -> JsonDict:
-        session_store = JsonRecommendationSessionStore(
-            _state_path("RECOMMENDER_SESSION_STORE_PATH")
-        )
+        settings = self._settings()
+        session_store = self._session_store(settings)
         session = session_store.get(request.session_id)
         if session is None:
             raise ApiNotFoundError(f"Recommendation session not found: {request.session_id}")
@@ -140,9 +147,7 @@ class DemoApiService:
             raise ApiValidationError(
                 "Track IDs were not recommended for this session: " + ", ".join(invalid_track_ids)
             )
-        feedback_service = FeedbackService(
-            store=JsonFeedbackStore(_state_path("RECOMMENDER_FEEDBACK_STORE_PATH"))
-        )
+        feedback_service = FeedbackService(store=self._feedback_store(settings))
         event = feedback_service.record_feedback(
             session_id=request.session_id,
             track_id=request.track_id,
@@ -168,7 +173,8 @@ class DemoApiService:
         ).to_dict()
 
     def get_profile_status(self) -> JsonDict:
-        snapshot = JsonProfileCache(_state_path("RECOMMENDER_PROFILE_CACHE_PATH")).load()
+        settings = self._settings()
+        snapshot = self._profile_cache(settings).load()
         if snapshot is None:
             return {"present": False, "profile": None, "synced_at": None}
         return {
@@ -225,9 +231,68 @@ class DemoApiService:
     def _profile_sync_service(self, settings: Settings) -> SpotifyProfileSyncService:
         return SpotifyProfileSyncService(
             spotify_client=self._spotify_user_client(settings),
-            cache=JsonProfileCache(_state_path("RECOMMENDER_PROFILE_CACHE_PATH")),
+            cache=self._profile_cache(settings),
             required_user_id=settings.spotify_demo_user_id,
         )
+
+    def _profile_cache(self, settings: Settings) -> ProfileCache:
+        if _use_dynamodb(settings, settings.users_table_name):
+            return DynamoDBProfileCache(
+                table_name=_required_table_name(
+                    settings,
+                    settings.users_table_name,
+                    "USERS_TABLE_NAME",
+                ),
+                user_id=settings.spotify_demo_user_id,
+                dynamodb_client=self._dynamodb_client(),
+            )
+        return JsonProfileCache(_state_path("RECOMMENDER_PROFILE_CACHE_PATH"))
+
+    def _session_store(self, settings: Settings) -> RecommendationSessionStore:
+        if _use_dynamodb(settings, settings.sessions_table_name):
+            return DynamoDBRecommendationSessionStore(
+                table_name=_required_table_name(
+                    settings,
+                    settings.sessions_table_name,
+                    "SESSIONS_TABLE_NAME",
+                ),
+                dynamodb_client=self._dynamodb_client(),
+            )
+        return JsonRecommendationSessionStore(_state_path("RECOMMENDER_SESSION_STORE_PATH"))
+
+    def _feedback_store(self, settings: Settings) -> JsonFeedbackStore | DynamoDBFeedbackStore:
+        if _use_dynamodb(settings, settings.feedback_table_name):
+            return DynamoDBFeedbackStore(
+                table_name=_required_table_name(
+                    settings,
+                    settings.feedback_table_name,
+                    "FEEDBACK_TABLE_NAME",
+                ),
+                dynamodb_client=self._dynamodb_client(),
+            )
+        return JsonFeedbackStore(_state_path("RECOMMENDER_FEEDBACK_STORE_PATH"))
+
+    def _playlist_store(
+        self,
+        settings: Settings,
+    ) -> JsonPlaylistRecordStore | DynamoDBPlaylistRecordStore:
+        if _use_dynamodb(settings, settings.playlists_table_name):
+            return DynamoDBPlaylistRecordStore(
+                table_name=_required_table_name(
+                    settings,
+                    settings.playlists_table_name,
+                    "PLAYLISTS_TABLE_NAME",
+                ),
+                dynamodb_client=self._dynamodb_client(),
+            )
+        return JsonPlaylistRecordStore(_state_path("RECOMMENDER_PLAYLIST_STORE_PATH"))
+
+    def _dynamodb_client(self) -> Any:
+        if self.dynamodb_client_factory is not None:
+            return self.dynamodb_client_factory()
+        import boto3
+
+        return boto3.client("dynamodb")
 
     def _spotify_user_client(self, settings: Settings) -> SpotifyUserClient:
         if not settings.spotify_user_refresh_token:
@@ -241,6 +306,26 @@ class DemoApiService:
 
 def _state_path(env_name: str) -> Path:
     return Path(os.getenv(env_name, f"data/local/api_state/{env_name.lower()}.json"))
+
+
+def _use_dynamodb(settings: Settings, table_name: str | None) -> bool:
+    if settings.runtime_store_backend == "local":
+        return False
+    if settings.runtime_store_backend == "dynamodb":
+        return True
+    return bool(table_name)
+
+
+def _required_table_name(
+    settings: Settings,
+    table_name: str | None,
+    env_name: str,
+) -> str:
+    if table_name:
+        return table_name
+    if settings.runtime_store_backend == "dynamodb":
+        raise ApiConfigurationError(f"{env_name} is required when RUNTIME_STORE_BACKEND=dynamodb.")
+    raise ApiConfigurationError(f"{env_name} is required for DynamoDB runtime state.")
 
 
 def _merge_tuple(existing: tuple[str, ...], extra: list[str]) -> tuple[str, ...]:

@@ -168,6 +168,10 @@ def _session_from_payload(payload: dict[str, Any]) -> RecommendationSession:
     )
 
 
+def recommendation_session_from_dict(payload: dict[str, Any]) -> RecommendationSession:
+    return _session_from_payload(payload)
+
+
 def _playlist_result_from_payload(payload: dict[str, Any]) -> PlaylistResult:
     return PlaylistResult(
         playlist_id=str(payload["playlist_id"]),

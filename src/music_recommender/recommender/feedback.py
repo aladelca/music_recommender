@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from music_recommender.models import JsonDict
 
@@ -53,8 +53,14 @@ class JsonFeedbackStore:
         )
 
 
+class FeedbackStore(Protocol):
+    def append(self, event: FeedbackEvent) -> None: ...
+
+    def list_by_session(self, session_id: str) -> list[FeedbackEvent]: ...
+
+
 class FeedbackService:
-    def __init__(self, *, store: JsonFeedbackStore) -> None:
+    def __init__(self, *, store: FeedbackStore) -> None:
         self.store = store
 
     def record_feedback(
@@ -92,3 +98,7 @@ def _event_from_payload(payload: dict[str, Any]) -> FeedbackEvent:
         metadata=dict(payload.get("metadata") or {}),
         created_at=str(payload["created_at"]),
     )
+
+
+def feedback_event_from_dict(payload: dict[str, Any]) -> FeedbackEvent:
+    return _event_from_payload(payload)

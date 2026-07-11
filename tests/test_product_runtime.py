@@ -9,6 +9,7 @@ import pytest
 
 from music_recommender.api.product_runtime import build_product_auth_runtime
 from music_recommender.config import load_settings
+from music_recommender.sources.spotify_user import SpotifyUserClient
 from music_recommender.storage.postgres import PostgresDatabase
 
 
@@ -79,7 +80,7 @@ def test_product_auth_runtime_wires_backend_only_dependencies(
     assert runtime.discovery_job_service is not None
     assert runtime.observer.user_correlation("account-1")
     assert runtime.ready() is True
-    spotify = runtime.auth_service.spotify_client_factory()
+    spotify = cast(SpotifyUserClient, runtime.auth_service.spotify_client_factory())
     try:
         assert spotify.request_timeout_seconds == 4.0
         assert spotify.request_max_retries == 0

@@ -99,6 +99,8 @@ def build_product_auth_runtime(
         spotify_client_factory=lambda: SpotifyUserClient(
             client_id=resolved_settings.spotify_client_id,
             client_secret=resolved_settings.spotify_client_secret,
+            request_timeout_seconds=4.0,
+            request_max_retries=0,
         ),
     )
     seed_service = SeedService(

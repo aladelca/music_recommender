@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ from music_recommender.storage.protocols import (
 CoverageStatus = Literal["ready", "degraded", "insufficient"]
 _MAPPING_TTL = timedelta(hours=24)
 _MAX_RANKED_RECORDINGS = 50
+_MAX_UNCACHED_CANDIDATES = 20
+_MAX_SEARCH_REQUESTS = 20
+_MAX_ELAPSED_SECONDS = 12.0
 
 
 class SpotifyTrackSearch(Protocol):
@@ -37,6 +41,27 @@ class MusicEntityReader(Protocol):
 class SpotifyMappingBatch:
     mappings: tuple[ExternalIdMappingRecord, ...]
     unmapped_recording_mbids: tuple[str, ...]
+    budget_exhausted: bool = False
+
+
+@dataclass
+class _SearchBudget:
+    monotonic: Callable[[], float]
+    started_at: float
+    max_requests: int
+    max_elapsed_seconds: float
+    request_count: int = 0
+    exhausted: bool = False
+
+    def reserve(self) -> bool:
+        if (
+            self.request_count >= self.max_requests
+            or self.monotonic() - self.started_at >= self.max_elapsed_seconds
+        ):
+            self.exhausted = True
+            return False
+        self.request_count += 1
+        return True
 
 
 @dataclass(frozen=True)
@@ -60,18 +85,42 @@ class SpotifyMappingService:
         spotify: SpotifyTrackSearch,
         market: str | None,
         now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        max_uncached_candidates: int = _MAX_UNCACHED_CANDIDATES,
+        max_search_requests: int = _MAX_SEARCH_REQUESTS,
+        max_elapsed_seconds: float = _MAX_ELAPSED_SECONDS,
     ) -> None:
+        if not 1 <= max_uncached_candidates <= _MAX_RANKED_RECORDINGS:
+            raise ValueError("Spotify mapping candidate budget must be between one and 50.")
+        if not 1 <= max_search_requests <= 100:
+            raise ValueError("Spotify mapping search budget must be between one and 100.")
+        if max_elapsed_seconds <= 0 or max_elapsed_seconds > 20:
+            raise ValueError(
+                "Spotify mapping time budget must be greater than zero and at most 20."
+            )
         self.entities = entities
         self.mappings = mappings
         self.spotify = spotify
         self.market = market
         self.now = now or (lambda: datetime.now(UTC))
+        self.monotonic = monotonic
+        self.max_uncached_candidates = max_uncached_candidates
+        self.max_search_requests = max_search_requests
+        self.max_elapsed_seconds = max_elapsed_seconds
 
     def map_ranked(self, *, recording_mbids: tuple[str, ...]) -> SpotifyMappingBatch:
         normalized_mbids = _unique_mbids(recording_mbids, limit=_MAX_RANKED_RECORDINGS)
         now = _aware_utc(self.now())
+        budget = _SearchBudget(
+            monotonic=self.monotonic,
+            started_at=self.monotonic(),
+            max_requests=self.max_search_requests,
+            max_elapsed_seconds=self.max_elapsed_seconds,
+        )
         mapped: list[ExternalIdMappingRecord] = []
         unmapped: list[str] = []
+        uncached_candidates = 0
+        candidate_budget_exhausted = False
         for recording_mbid in normalized_mbids:
             cached = self.mappings.get_fresh(
                 recording_mbid=recording_mbid,
@@ -85,6 +134,11 @@ class SpotifyMappingService:
             if entity is None or entity.entity_type != "recording" or entity.expires_at <= now:
                 unmapped.append(recording_mbid)
                 continue
+            if uncached_candidates >= self.max_uncached_candidates:
+                candidate_budget_exhausted = True
+                unmapped.append(recording_mbid)
+                continue
+            uncached_candidates += 1
             match = self._find_match(
                 name=entity.name,
                 artist_names=tuple(
@@ -93,6 +147,7 @@ class SpotifyMappingService:
                     if isinstance(credit.get("name"), str)
                 ),
                 isrcs=entity.isrcs,
+                budget=budget,
             )
             if match is None:
                 unmapped.append(recording_mbid)
@@ -113,6 +168,7 @@ class SpotifyMappingService:
         return SpotifyMappingBatch(
             mappings=tuple(mapped),
             unmapped_recording_mbids=tuple(unmapped),
+            budget_exhausted=candidate_budget_exhausted or budget.exhausted,
         )
 
     def _find_match(
@@ -121,11 +177,14 @@ class SpotifyMappingService:
         name: str,
         artist_names: tuple[str, ...],
         isrcs: tuple[str, ...],
+        budget: _SearchBudget,
     ) -> tuple[str, str, float] | None:
         for isrc in isrcs[:3]:
             normalized_isrc = _normalized_isrc(isrc)
             if normalized_isrc is None:
                 continue
+            if not budget.reserve():
+                return None
             tracks = self.spotify.search_tracks(
                 f"isrc:{normalized_isrc}",
                 limit=5,
@@ -138,6 +197,8 @@ class SpotifyMappingService:
                         return track_id, "isrc_exact", 1.0
 
         if not artist_names:
+            return None
+        if not budget.reserve():
             return None
         query = f'track:"{_query_text(name)}" artist:"{_query_text(artist_names[0])}"'
         tracks = self.spotify.search_tracks(query, limit=5, market=self.market)

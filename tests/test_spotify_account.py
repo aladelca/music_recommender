@@ -69,6 +69,8 @@ def test_account_spotify_client_decrypts_for_current_account_and_persists_rotati
 
     assert vault.decrypt_calls == [{"account_id": "account-1", "ciphertext": b"encrypted-token"}]
     assert client_arguments["refresh_token"] == "plaintext-refresh-token"
+    assert client_arguments["request_timeout_seconds"] == 4.0
+    assert client_arguments["request_max_retries"] == 0
     assert vault.encrypt_calls == [
         {"account_id": "account-1", "refresh_token": "rotated-refresh-token"}
     ]

@@ -126,13 +126,29 @@ class SpotifyUserClient:
         refresh_token_updated: Callable[[str], None] | None = None,
         auth_http: ApiHttpClient | None = None,
         api_http: ApiHttpClient | None = None,
+        request_timeout_seconds: float = 20.0,
+        request_max_retries: int = 3,
     ) -> None:
+        if request_timeout_seconds <= 0 or request_timeout_seconds > 30:
+            raise ValueError("Spotify request timeout must be greater than zero and at most 30.")
+        if not 0 <= request_max_retries <= 5:
+            raise ValueError("Spotify request retries must be between zero and five.")
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
         self.refresh_token_updated = refresh_token_updated
-        self.auth_http = auth_http or ApiHttpClient(base_url=AUTH_BASE_URL)
-        self.api_http = api_http or ApiHttpClient(base_url=API_BASE_URL)
+        self.request_timeout_seconds = request_timeout_seconds
+        self.request_max_retries = request_max_retries
+        self.auth_http = auth_http or ApiHttpClient(
+            base_url=AUTH_BASE_URL,
+            timeout=request_timeout_seconds,
+            max_retries=request_max_retries,
+        )
+        self.api_http = api_http or ApiHttpClient(
+            base_url=API_BASE_URL,
+            timeout=request_timeout_seconds,
+            max_retries=request_max_retries,
+        )
         self._access_token: str | None = None
         self._expires_at = 0.0
 

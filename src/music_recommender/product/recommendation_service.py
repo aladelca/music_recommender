@@ -171,6 +171,7 @@ class RecommendationService:
         }
         mapping_by_mbid: dict[str, str] = {}
         display_by_spotify_id: dict[str, JsonDict] = {}
+        mapping_budget_exhausted = False
         if ranked:
             spotify = self.spotify_clients.create(account_id=account_id)
             try:
@@ -181,6 +182,7 @@ class RecommendationService:
                     market=self.market,
                     now=lambda: generated_at,
                 ).map_ranked(recording_mbids=tuple(candidate.entity.mbid for candidate in ranked))
+                mapping_budget_exhausted = mapping_batch.budget_exhausted
                 mapping_by_mbid = {
                     mapping.recording_mbid: mapping.provider_id
                     for mapping in mapping_batch.mappings
@@ -238,7 +240,11 @@ class RecommendationService:
             },
             parsed_intent=intent.to_dict(),
             seed_ids=tuple(seed.id for seed in selected_seeds),
-            source_snapshot=_source_snapshot(ranked, coverage),
+            source_snapshot=_source_snapshot(
+                ranked,
+                coverage,
+                mapping_budget_exhausted=mapping_budget_exhausted,
+            ),
             ranking_version=DISCOVERY_RANKING_VERSION,
             status=coverage.status,
             generated_at=generated_at,
@@ -488,10 +494,13 @@ def _eligible_mapping_mbids(
 def _source_snapshot(
     ranked: list[RankedDiscoveryCandidate],
     coverage: SourceCoverageReport,
+    *,
+    mapping_budget_exhausted: bool,
 ) -> JsonDict:
     edges = [edge for candidate in ranked for edge in candidate.edges]
     return {
         "coverage": asdict(coverage),
+        "mapping_budget_exhausted": mapping_budget_exhausted,
         "source_adapters": sorted({edge.source_adapter for edge in edges}),
         "source_algorithm_versions": sorted({edge.algorithm_version for edge in edges}),
         "entity_source_versions": sorted(

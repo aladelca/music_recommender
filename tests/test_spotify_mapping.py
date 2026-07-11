@@ -14,6 +14,7 @@ from music_recommender.storage.protocols import (
 
 RECORDING_ONE = "10000000-0000-0000-0000-000000000001"
 RECORDING_TWO = "10000000-0000-0000-0000-000000000002"
+RECORDING_THREE = "10000000-0000-0000-0000-000000000003"
 
 
 class InMemoryEntities:
@@ -144,6 +145,64 @@ def test_spotify_mapping_falls_back_to_exact_name_and_artist_without_fuzzy_match
     assert result.mappings[0].provider_id == "spotify-2"
     assert result.mappings[0].mapping_source == "name_artist_exact"
     assert result.mappings[0].confidence == 0.9
+
+
+def test_spotify_mapping_bounds_uncached_candidates_and_search_requests() -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    entities = InMemoryEntities(
+        (
+            recording(RECORDING_ONE, "One", ()),
+            recording(RECORDING_TWO, "Two", ()),
+            recording(RECORDING_THREE, "Three", ()),
+        )
+    )
+    spotify = FakeSpotifySearch({})
+    service = SpotifyMappingService(
+        entities=entities,
+        mappings=InMemoryMappings(),
+        spotify=spotify,
+        market="CA",
+        now=lambda: now,
+        max_uncached_candidates=2,
+        max_search_requests=1,
+        monotonic=lambda: 0.0,
+    )
+
+    result = service.map_ranked(recording_mbids=(RECORDING_ONE, RECORDING_TWO, RECORDING_THREE))
+
+    assert len(spotify.queries) == 1
+    assert result.mappings == ()
+    assert result.budget_exhausted is True
+    assert result.unmapped_recording_mbids == (
+        RECORDING_ONE,
+        RECORDING_TWO,
+        RECORDING_THREE,
+    )
+
+
+def test_spotify_mapping_stops_searching_when_elapsed_budget_is_exhausted() -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    monotonic_values = iter((0.0, 0.0, 13.0))
+    spotify = FakeSpotifySearch({})
+    service = SpotifyMappingService(
+        entities=InMemoryEntities(
+            (
+                recording(RECORDING_ONE, "One", ()),
+                recording(RECORDING_TWO, "Two", ()),
+            )
+        ),
+        mappings=InMemoryMappings(),
+        spotify=spotify,
+        market="CA",
+        now=lambda: now,
+        max_elapsed_seconds=12.0,
+        monotonic=lambda: next(monotonic_values),
+    )
+
+    result = service.map_ranked(recording_mbids=(RECORDING_ONE, RECORDING_TWO))
+
+    assert len(spotify.queries) == 1
+    assert result.budget_exhausted is True
 
 
 def test_source_coverage_requires_ten_mapped_and_ninety_percent_evidence() -> None:

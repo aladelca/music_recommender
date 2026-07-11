@@ -241,6 +241,9 @@ replace the user comparison outcome.
 - Less-listened does not necessarily mean novel to a particular tester.
 - Tag quality and coverage vary by genre, language, region, and release.
 - Spotify post-ranking mapping can fail or choose no result despite a valid MusicBrainz recording.
+- Synchronous post-ranking mapping is bounded to 20 uncached candidates, 20 search requests, and 12
+  elapsed seconds. Exhaustion is recorded in the source snapshot and can produce honest
+  `insufficient` coverage rather than a gateway timeout.
 - Five Development Mode testers cannot establish market-wide superiority.
 - Explicit status may remain unknown until post-ranking mapping.
 

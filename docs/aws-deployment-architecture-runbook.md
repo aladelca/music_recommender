@@ -172,6 +172,9 @@ stack when `DeployLegacyDemo=false`.
 
 - FIFO deduplication, job claims, and playlist idempotency make retries bounded.
 - Partial SQS batch responses retry only failed records; three failed receives move to the DLQ.
+- Synchronous product Spotify calls use a four-second timeout without in-request retries. Mapping
+  attempts at most 20 uncached candidates and 20 searches within a 12-second elapsed budget, then
+  returns honest insufficient coverage instead of overrunning API Gateway.
 - Postgres writes that span multiple records run in transactions.
 - `/health` is shallow; `/ready` verifies database connectivity without exposing settings.
 - Lambda/SQS and custom EMF alarms notify the SNS operator subscription after email confirmation.

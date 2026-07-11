@@ -79,3 +79,9 @@ def test_product_auth_runtime_wires_backend_only_dependencies(
     assert runtime.discovery_job_service is not None
     assert runtime.observer.user_correlation("account-1")
     assert runtime.ready() is True
+    spotify = runtime.auth_service.spotify_client_factory()
+    try:
+        assert spotify.request_timeout_seconds == 4.0
+        assert spotify.request_max_retries == 0
+    finally:
+        spotify.close()

@@ -82,6 +82,8 @@ class AccountSpotifyClientFactory:
             client_secret=self.client_secret,
             refresh_token=refresh_token,
             refresh_token_updated=refresh_token_updated,
+            request_timeout_seconds=4.0,
+            request_max_retries=0,
         )
 
 

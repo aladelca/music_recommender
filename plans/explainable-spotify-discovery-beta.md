@@ -531,7 +531,7 @@ The proposed weights are an initial falsifiable baseline, not a claim of optimal
 33. [x] Validate locally with unit, integration, contract, UI, security, and package tests.
     - Files: all changed code/tests and generated build artifacts outside git
    - Notes: Start local Supabase, reset migrations, run the complete Python and frontend suites, mock Spotify failure/retry paths, run cross-tenant/security tests, build SAM and Vercel artifacts, and prove no credentials, Parquet, or CSV files are included. Resolve every failure before deployment.
-   - Completed: Reset local Supabase, passed 32 pgTAP assertions and seven live Postgres integrations, 296 Python tests, Ruff/mypy, 13 frontend component tests, three desktop/mobile Playwright flows, npm audit/lint/typecheck/build, Vercel secret scanning, SAM lint/build/prune, migration preflight, and package policy/import checks. Product artifacts are 31,584 KB (API), 22,960 KB (worker), and 20,868 KB (cleanup), with no `.env`, Parquet, CSV, web framework dependency in worker/cleanup, or privileged frontend marker.
+   - Completed: Reset local Supabase, passed 32 pgTAP assertions and seven live Postgres integrations, 298 Python tests, Ruff/mypy, 13 frontend component tests, three desktop/mobile Playwright flows, npm audit/lint/typecheck/build, Vercel secret scanning, SAM lint/build/prune, migration preflight, and package policy/import checks. Product artifacts are 31,584 KB (API), 22,960 KB (worker), and 20,868 KB (cleanup), with no `.env`, Parquet, CSV, web framework dependency in worker/cleanup, or privileged frontend marker.
 
 34. [x] Provision Supabase and deploy AWS in compatibility mode.
     - Files: production Supabase project, AWS Secrets Manager/KMS/SQS/Lambda/API Gateway/CloudWatch resources

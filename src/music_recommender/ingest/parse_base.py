@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from music_recommender.models import SeedArtist
+from music_recommender.normalization import normalize_lookup_key
 
 LABEL_PATTERN = re.compile(r"^(?:singer|band)\s*:\s*", re.IGNORECASE)
 WHITESPACE_PATTERN = re.compile(r"\s+")
-
-
-def normalize_lookup_key(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value.strip().lower())
-    without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
-    return WHITESPACE_PATTERN.sub(" ", without_accents).strip()
 
 
 def load_aliases(path: Path | str) -> dict[str, str]:

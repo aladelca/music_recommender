@@ -4,7 +4,6 @@ import base64
 import time
 from typing import Any
 
-from music_recommender.ingest.parse_base import normalize_lookup_key
 from music_recommender.models import (
     AudioFeaturesRecord,
     JsonDict,
@@ -12,6 +11,7 @@ from music_recommender.models import (
     SpotifyArtist,
     SpotifyTrack,
 )
+from music_recommender.normalization import normalize_lookup_key
 from music_recommender.sources.http import ApiError, ApiHttpClient
 
 AUTH_BASE_URL = "https://accounts.spotify.com"

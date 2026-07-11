@@ -1,20 +1,49 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import secrets
 import time
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from music_recommender.models import JsonDict
-from music_recommender.sources.http import ApiHttpClient
+from music_recommender.sources.http import ApiError, ApiHttpClient
 
 AUTH_BASE_URL = "https://accounts.spotify.com"
 API_BASE_URL = "https://api.spotify.com/v1"
 
 TopItemType = Literal["artists", "tracks"]
 TopTimeRange = Literal["short_term", "medium_term", "long_term"]
+_PKCE_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+
+
+class SpotifyClientError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class SpotifyReauthorizationRequired(SpotifyClientError):
+    pass
+
+
+class SpotifyPermissionDenied(SpotifyClientError):
+    pass
+
+
+class SpotifyRateLimited(SpotifyClientError):
+    pass
+
+
+class SpotifyServiceUnavailable(SpotifyClientError):
+    pass
+
+
+class SpotifyResponseError(SpotifyClientError):
+    pass
 
 
 class SpotifyScopeError(ValueError):
@@ -46,6 +75,7 @@ def build_authorization_url(
     redirect_uri: str,
     scopes: tuple[str, ...],
     state: str | None = None,
+    code_challenge: str | None = None,
 ) -> str:
     params = {
         "response_type": "code",
@@ -56,7 +86,23 @@ def build_authorization_url(
         params["scope"] = " ".join(scopes)
     if state:
         params["state"] = state
+    if code_challenge is not None:
+        _validate_pkce_challenge(code_challenge)
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
     return f"{AUTH_BASE_URL}/authorize?{urllib.parse.urlencode(params)}"
+
+
+def generate_pkce_verifier(*, length: int = 64) -> str:
+    if not 43 <= length <= 128:
+        raise ValueError("PKCE verifier length must be between 43 and 128 characters.")
+    return "".join(secrets.choice(_PKCE_CHARACTERS) for _ in range(length))
+
+
+def pkce_code_challenge(code_verifier: str) -> str:
+    _validate_pkce_verifier(code_verifier)
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 def missing_required_scopes(granted_scope: str, required_scopes: tuple[str, ...]) -> list[str]:
@@ -77,12 +123,14 @@ class SpotifyUserClient:
         client_id: str,
         client_secret: str,
         refresh_token: str | None = None,
+        refresh_token_updated: Callable[[str], None] | None = None,
         auth_http: ApiHttpClient | None = None,
         api_http: ApiHttpClient | None = None,
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
+        self.refresh_token_updated = refresh_token_updated
         self.auth_http = auth_http or ApiHttpClient(base_url=AUTH_BASE_URL)
         self.api_http = api_http or ApiHttpClient(base_url=API_BASE_URL)
         self._access_token: str | None = None
@@ -97,15 +145,18 @@ class SpotifyUserClient:
         *,
         code: str,
         redirect_uri: str,
+        code_verifier: str | None = None,
         required_scopes: tuple[str, ...] = (),
     ) -> SpotifyAccessToken:
-        payload = self._request_token(
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-            }
-        )
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+        }
+        if code_verifier is not None:
+            _validate_pkce_verifier(code_verifier)
+            data["code_verifier"] = code_verifier
+        payload = self._request_token(data=data)
         token = SpotifyAccessToken.from_payload(payload)
         self._store_token(token)
         self._require_scopes(token, required_scopes)
@@ -133,6 +184,58 @@ class SpotifyUserClient:
 
     def get_current_user_profile(self) -> JsonDict:
         return self._get("/me")
+
+    def get_current_account_id(self) -> str:
+        account_id = _optional_str(self.get_current_user_profile().get("account_id"))
+        if not account_id:
+            raise SpotifyResponseError("Spotify response did not include a valid account_id.")
+        return account_id
+
+    def search_tracks(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        market: str | None = None,
+    ) -> tuple[JsonDict, ...]:
+        normalized_query = " ".join(query.split())
+        if not 1 <= len(normalized_query) <= 250:
+            raise ValueError("Spotify track search query must be between 1 and 250 characters.")
+        if not 1 <= limit <= 10:
+            raise ValueError("Spotify track search limit must be between 1 and 10.")
+        params: dict[str, str | int] = {
+            "q": normalized_query,
+            "type": "track",
+            "limit": limit,
+        }
+        if market:
+            params["market"] = market
+        payload = self._get("/search", params=params)
+        tracks = payload.get("tracks")
+        if not isinstance(tracks, dict):
+            return ()
+        items = tracks.get("items")
+        if not isinstance(items, list):
+            return ()
+        return tuple(dict(item) for item in items[:limit] if isinstance(item, dict))
+
+    def get_tracks(
+        self,
+        track_ids: tuple[str, ...],
+        *,
+        market: str | None = None,
+    ) -> tuple[JsonDict, ...]:
+        normalized_ids = tuple(dict.fromkeys(_spotify_id(track_id) for track_id in track_ids))
+        if not 1 <= len(normalized_ids) <= 50:
+            raise ValueError("Spotify track lookup accepts between 1 and 50 unique IDs.")
+        params: dict[str, str] = {"ids": ",".join(normalized_ids)}
+        if market:
+            params["market"] = market
+        payload = self._get("/tracks", params=params)
+        tracks = payload.get("tracks")
+        if not isinstance(tracks, list):
+            return ()
+        return tuple(dict(track) for track in tracks if isinstance(track, dict))
 
     def get_top_items(
         self,
@@ -265,16 +368,16 @@ class SpotifyUserClient:
 
     def create_playlist(
         self,
-        user_id: str,
         *,
         name: str,
         description: str = "",
         public: bool = False,
     ) -> JsonDict:
         return self._post(
-            f"/users/{user_id}/playlists",
+            "/me/playlists",
             json={"name": name, "description": description, "public": public},
             expected_statuses=(200, 201),
+            retry=False,
         )
 
     def add_playlist_items(self, playlist_id: str, track_ids_or_uris: list[str]) -> JsonDict:
@@ -284,27 +387,50 @@ class SpotifyUserClient:
             raise ValueError("Spotify accepts at most 100 playlist items per request.")
         uris = [spotify_track_uri(track_id_or_uri) for track_id_or_uri in track_ids_or_uris]
         return self._post(
-            f"/playlists/{playlist_id}/tracks",
+            f"/playlists/{playlist_id}/items",
+            json={"uris": uris},
+            expected_statuses=(200, 201),
+            retry=False,
+        )
+
+    def replace_playlist_items(
+        self,
+        playlist_id: str,
+        track_ids_or_uris: list[str],
+    ) -> JsonDict:
+        if not track_ids_or_uris:
+            raise ValueError("At least one Spotify track ID or URI is required.")
+        if len(track_ids_or_uris) > 100:
+            raise ValueError("Spotify accepts at most 100 playlist items per request.")
+        uris = [spotify_track_uri(track_id_or_uri) for track_id_or_uri in track_ids_or_uris]
+        return self._put(
+            f"/playlists/{_spotify_id(playlist_id)}/items",
             json={"uris": uris},
             expected_statuses=(200, 201),
         )
 
     def _request_token(self, *, data: dict[str, str]) -> JsonDict:
-        response = self.auth_http.post(
-            "/api/token",
-            headers={
-                "Authorization": f"Basic {_basic_auth_value(self.client_id, self.client_secret)}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            data=data,
-        )
+        basic_authorization = _basic_auth_value(self.client_id, self.client_secret)
+        try:
+            response = self.auth_http.post(
+                "/api/token",
+                headers={
+                    "Authorization": f"Basic {basic_authorization}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data=data,
+            )
+        except ApiError as error:
+            raise _classify_spotify_error(error, token_request=True) from None
         return _json_object(response.json(), "/api/token")
 
     def _store_token(self, token: SpotifyAccessToken) -> None:
+        if token.refresh_token and token.refresh_token != self.refresh_token:
+            if self.refresh_token_updated is not None:
+                self.refresh_token_updated(token.refresh_token)
+            self.refresh_token = token.refresh_token
         self._access_token = token.access_token
         self._expires_at = time.time() + token.expires_in
-        if token.refresh_token:
-            self.refresh_token = token.refresh_token
 
     def _require_scopes(
         self,
@@ -318,20 +444,47 @@ class SpotifyUserClient:
             )
 
     def _get(self, path: str, **kwargs: Any) -> JsonDict:
-        response = self.api_http.get(
-            path,
-            headers={"Authorization": f"Bearer {self.get_access_token()}"},
-            **kwargs,
-        )
+        try:
+            response = self.api_http.get(
+                path,
+                headers={"Authorization": f"Bearer {self.get_access_token()}"},
+                **kwargs,
+            )
+        except ApiError as error:
+            if error.status_code == 401:
+                self._clear_access_token()
+            raise _classify_spotify_error(error) from None
         return _json_object(response.json(), path)
 
     def _post(self, path: str, **kwargs: Any) -> JsonDict:
-        response = self.api_http.post(
-            path,
-            headers={"Authorization": f"Bearer {self.get_access_token()}"},
-            **kwargs,
-        )
+        try:
+            response = self.api_http.post(
+                path,
+                headers={"Authorization": f"Bearer {self.get_access_token()}"},
+                **kwargs,
+            )
+        except ApiError as error:
+            if error.status_code == 401:
+                self._clear_access_token()
+            raise _classify_spotify_error(error) from None
         return _json_object(response.json(), path)
+
+    def _put(self, path: str, **kwargs: Any) -> JsonDict:
+        try:
+            response = self.api_http.put(
+                path,
+                headers={"Authorization": f"Bearer {self.get_access_token()}"},
+                **kwargs,
+            )
+        except ApiError as error:
+            if error.status_code == 401:
+                self._clear_access_token()
+            raise _classify_spotify_error(error) from None
+        return _json_object(response.json(), path)
+
+    def _clear_access_token(self) -> None:
+        self._access_token = None
+        self._expires_at = 0.0
 
     def _iter_paged_items(
         self,
@@ -388,3 +541,56 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _spotify_id(value: str) -> str:
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > 255
+        or any(ord(character) < 32 for character in normalized)
+    ):
+        raise ValueError("Spotify ID is invalid.")
+    return normalized
+
+
+def _validate_pkce_verifier(code_verifier: str) -> None:
+    if not 43 <= len(code_verifier) <= 128:
+        raise ValueError("PKCE verifier length must be between 43 and 128 characters.")
+    if any(character not in _PKCE_CHARACTERS for character in code_verifier):
+        raise ValueError("PKCE verifier contains invalid characters.")
+
+
+def _validate_pkce_challenge(code_challenge: str) -> None:
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    if len(code_challenge) != 43 or any(character not in allowed for character in code_challenge):
+        raise ValueError("PKCE S256 challenge must be a 43-character base64url value.")
+
+
+def _classify_spotify_error(
+    error: ApiError,
+    *,
+    token_request: bool = False,
+) -> SpotifyClientError:
+    status_code = error.status_code
+    if status_code == 401 or (token_request and status_code == 400):
+        return SpotifyReauthorizationRequired(
+            "Spotify authorization is no longer valid; reconnect the account.",
+            status_code=status_code,
+        )
+    if status_code == 403:
+        return SpotifyPermissionDenied(
+            "Spotify denied this operation for the current account.",
+            status_code=status_code,
+        )
+    if status_code == 429:
+        return SpotifyRateLimited(
+            "Spotify rate limit remained active after bounded retries.",
+            status_code=status_code,
+        )
+    if 500 <= status_code <= 599:
+        return SpotifyServiceUnavailable(
+            "Spotify is temporarily unavailable after bounded retries.",
+            status_code=status_code,
+        )
+    return SpotifyClientError("Spotify request failed.", status_code=status_code)

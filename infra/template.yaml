@@ -1,6 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Serverless deployment foundation for the music recommender class demo.
+Description: Outside the Loop product runtime with an optional isolated legacy demo.
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W1028
 
 Parameters:
   StageName:
@@ -8,6 +13,7 @@ Parameters:
     Default: "$default"
   DataBucketName:
     Type: String
+    Default: unused-legacy-data-bucket
     Description: S3 bucket containing extracted recommender data.
   DataPrefix:
     Type: String
@@ -39,15 +45,345 @@ Parameters:
     Type: String
     Default: "cron(0 10 * * ? *)"
     Description: EventBridge schedule for refreshing the configured Spotify profile cache.
+  ProductAuthMode:
+    Type: String
+    Default: hybrid
+    AllowedValues:
+      - hybrid
+      - spotify_session
+    Description: Authentication mode for the isolated multi-user product API.
+  AppBaseUrl:
+    Type: String
+    AllowedPattern: "^https://[A-Za-z0-9.-]+(?::[0-9]+)?$"
+    Description: Exact Vercel production origin with no trailing slash.
+  ProductRuntimeSecretName:
+    Type: String
+    Default: "music-recommender/product/runtime"
+    Description: Secrets Manager JSON secret containing Supabase, Spotify, and observability values.
+  MusicBrainzContactEmail:
+    Type: String
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    Description: Contact email sent in MusicBrainz and ListenBrainz User-Agent headers.
+  SpotifyMarket:
+    Type: String
+    Default: US
+    AllowedPattern: "^[A-Z]{2}$"
+  CleanupScheduleExpression:
+    Type: String
+    Default: "cron(0 5 * * ? *)"
+    Description: Daily UTC schedule for bounded product retention cleanup.
+  DeployLegacyDemo:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Deploy the isolated single-user S3/DynamoDB compatibility stack.
+  EnableReservedConcurrency:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable product Lambda reservations after the account concurrency quota is raised.
+
+Conditions:
+  DeployLegacy:
+    Fn::Equals:
+      - Ref: DeployLegacyDemo
+      - "true"
+  UseProductReservedConcurrency:
+    Fn::Equals:
+      - Ref: EnableReservedConcurrency
+      - "true"
 
 Resources:
+  OutsideTheLoopAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+      TopicName:
+        Fn::Sub: "${AWS::StackName}-product-alarms"
+
+  OutsideTheLoopAlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint:
+        Ref: MusicBrainzContactEmail
+      Protocol: email
+      TopicArn:
+        Ref: OutsideTheLoopAlarmTopic
+
+  OutsideTheLoopHttpApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  OutsideTheLoopHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName:
+        Ref: StageName
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+      AccessLogSettings:
+        DestinationArn:
+          Fn::GetAtt:
+            - OutsideTheLoopHttpApiAccessLogGroup
+            - Arn
+        Format: >-
+          {"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","status":"$context.status","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage"}
+
+  OutsideTheLoopTokenKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts Outside the Loop Spotify refresh tokens and OAuth PKCE verifiers.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  OutsideTheLoopTokenKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName:
+        Fn::Sub: "alias/${AWS::StackName}-outside-loop-tokens"
+      TargetKeyId:
+        Ref: OutsideTheLoopTokenKey
+
+  OutsideTheLoopDiscoveryDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Fn::Sub: "${AWS::StackName}-discovery-dlq.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      KmsMasterKeyId: alias/aws/sqs
+      MessageRetentionPeriod: 1209600
+
+  OutsideTheLoopDiscoveryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Fn::Sub: "${AWS::StackName}-discovery.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      KmsMasterKeyId: alias/aws/sqs
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
+            - OutsideTheLoopDiscoveryDlq
+            - Arn
+        maxReceiveCount: 3
+
+  OutsideTheLoopApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${OutsideTheLoopApiFunction}"
+      RetentionInDays: 30
+
+  OutsideTheLoopApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../.lambda-build/product-api
+      Handler: music_recommender.api.product_lambda_handler.handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      MemorySize: 768
+      Timeout: 29
+      ReservedConcurrentExecutions:
+        Fn::If:
+          - UseProductReservedConcurrency
+          - 5
+          - Ref: AWS::NoValue
+      Tracing: Active
+      Environment:
+        Variables:
+          AUTH_MODE:
+            Ref: ProductAuthMode
+          APP_BASE_URL:
+            Ref: AppBaseUrl
+          AUTH_ALLOWED_ORIGINS:
+            Ref: AppBaseUrl
+          DISCOVERY_QUEUE_URL:
+            Ref: OutsideTheLoopDiscoveryQueue
+          MUSICBRAINZ_CONTACT_EMAIL:
+            Ref: MusicBrainzContactEmail
+          OBSERVABILITY_HASH_KEY:
+            Fn::Sub: "{{resolve:secretsmanager:${ProductRuntimeSecretName}:SecretString:OBSERVABILITY_HASH_KEY}}"
+          POSTGRES_POOL_MIN_SIZE: "0"
+          POSTGRES_POOL_MAX_SIZE: "2"
+          POSTGRES_POOL_TIMEOUT_SECONDS: "5"
+          POSTGRES_STATEMENT_TIMEOUT_MS: "5000"
+          PYTHONPATH: /var/task/src
+          RUNTIME_STORE_BACKEND: supabase
+          SPOTIFY_APP_CLIENT_ID:
+            Fn::Sub: "{{resolve:secretsmanager:${ProductRuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_ID}}"
+          SPOTIFY_APP_CLIENT_SECRET:
+            Fn::Sub: "{{resolve:secretsmanager:${ProductRuntimeSecretName}:SecretString:SPOTIFY_APP_CLIENT_SECRET}}"
+          SPOTIFY_MARKET:
+            Ref: SpotifyMarket
+          SPOTIFY_PRODUCT_SCOPES: "user-read-private playlist-modify-private playlist-modify-public"
+          SPOTIFY_REDIRECT_URI:
+            Fn::Sub: "${AppBaseUrl}/api/auth/spotify/callback"
+          SPOTIFY_TOKEN_KMS_KEY_ID:
+            Fn::GetAtt:
+              - OutsideTheLoopTokenKey
+              - Arn
+          SUPABASE_DB_URL:
+            Fn::Sub: "{{resolve:secretsmanager:${ProductRuntimeSecretName}:SecretString:SUPABASE_DB_URL}}"
+      Events:
+        RootRoute:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: OutsideTheLoopHttpApi
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: OutsideTheLoopHttpApi
+            Path: /{proxy+}
+            Method: ANY
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:Encrypt
+              Resource:
+                Fn::GetAtt:
+                  - OutsideTheLoopTokenKey
+                  - Arn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource:
+                Fn::GetAtt:
+                  - OutsideTheLoopDiscoveryQueue
+                  - Arn
+
+  OutsideTheLoopDiscoveryWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${OutsideTheLoopDiscoveryWorkerFunction}"
+      RetentionInDays: 30
+
+  OutsideTheLoopDiscoveryWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../.lambda-build/discovery-worker
+      Handler: music_recommender.api.discovery_worker_handler.handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      MemorySize: 512
+      Timeout: 120
+      ReservedConcurrentExecutions:
+        Fn::If:
+          - UseProductReservedConcurrency
+          - 2
+          - Ref: AWS::NoValue
+      Tracing: Active
+      Environment:
+        Variables:
+          AUTH_MODE: api_key
+          MUSICBRAINZ_CONTACT_EMAIL:
+            Ref: MusicBrainzContactEmail
+          OBSERVABILITY_HASH_KEY:
+            Fn::Sub: "{{resolve:secretsmanager:${ProductRuntimeSecretName}:SecretString:OBSERVABILITY_HASH_KEY}}"
+          POSTGRES_POOL_MIN_SIZE: "0"
+          POSTGRES_POOL_MAX_SIZE: "1"
+          POSTGRES_POOL_TIMEOUT_SECONDS: "5"
+          POSTGRES_STATEMENT_TIMEOUT_MS: "10000"
+          PYTHONPATH: /var/task/src
+          RUNTIME_STORE_BACKEND: supabase
+          SUPABASE_DB_URL:
+            Fn::Sub: "{{resolve:secretsmanager:${ProductRuntimeSecretName}:SecretString:SUPABASE_DB_URL}}"
+      Events:
+        DiscoveryQueue:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+                - OutsideTheLoopDiscoveryQueue
+                - Arn
+            BatchSize: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 2
+
+  OutsideTheLoopCleanupLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${OutsideTheLoopCleanupFunction}"
+      RetentionInDays: 30
+
+  OutsideTheLoopCleanupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../.lambda-build/cleanup
+      Handler: music_recommender.api.cleanup_handler.handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      MemorySize: 256
+      Timeout: 60
+      ReservedConcurrentExecutions:
+        Fn::If:
+          - UseProductReservedConcurrency
+          - 1
+          - Ref: AWS::NoValue
+      Tracing: Active
+      Environment:
+        Variables:
+          AUTH_MODE: api_key
+          POSTGRES_POOL_MIN_SIZE: "0"
+          POSTGRES_POOL_MAX_SIZE: "1"
+          POSTGRES_POOL_TIMEOUT_SECONDS: "5"
+          POSTGRES_STATEMENT_TIMEOUT_MS: "30000"
+          PYTHONPATH: /var/task/src
+          RUNTIME_STORE_BACKEND: supabase
+          SUPABASE_DB_URL:
+            Fn::Sub: "{{resolve:secretsmanager:${ProductRuntimeSecretName}:SecretString:SUPABASE_DB_URL}}"
+      Events:
+        DailyCleanup:
+          Type: Schedule
+          Properties:
+            Description: Remove expired product records in bounded batches.
+            Enabled: true
+            Schedule:
+              Ref: CleanupScheduleExpression
+
   MusicRecommenderHttpApiAccessLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: DeployLegacy
     Properties:
       RetentionInDays: 14
 
   MusicRecommenderHttpApi:
     Type: AWS::Serverless::HttpApi
+    Condition: DeployLegacy
     Properties:
       StageName:
         Ref: StageName
@@ -61,6 +397,7 @@ Resources:
 
   MusicRecommenderUsersTable:
     Type: AWS::DynamoDB::Table
+    Condition: DeployLegacy
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -78,6 +415,7 @@ Resources:
 
   MusicRecommenderSessionsTable:
     Type: AWS::DynamoDB::Table
+    Condition: DeployLegacy
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -95,6 +433,7 @@ Resources:
 
   MusicRecommenderFeedbackTable:
     Type: AWS::DynamoDB::Table
+    Condition: DeployLegacy
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -116,6 +455,7 @@ Resources:
 
   MusicRecommenderPlaylistsTable:
     Type: AWS::DynamoDB::Table
+    Condition: DeployLegacy
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -133,6 +473,7 @@ Resources:
 
   MusicRecommenderApiLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: DeployLegacy
     Properties:
       LogGroupName:
         Fn::Sub: "/aws/lambda/${MusicRecommenderApiFunction}"
@@ -140,6 +481,7 @@ Resources:
 
   MusicRecommenderApiFunction:
     Type: AWS::Serverless::Function
+    Condition: DeployLegacy
     Properties:
       CodeUri: ../.lambda-build/api
       Handler: music_recommender.api.lambda_handler.handler
@@ -246,6 +588,7 @@ Resources:
 
   MusicRecommenderProfileSyncLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: DeployLegacy
     Properties:
       LogGroupName:
         Fn::Sub: "/aws/lambda/${MusicRecommenderProfileSyncFunction}"
@@ -253,6 +596,7 @@ Resources:
 
   MusicRecommenderProfileSyncFunction:
     Type: AWS::Serverless::Function
+    Condition: DeployLegacy
     Properties:
       CodeUri: ../.lambda-build/profile-sync
       Handler: music_recommender.api.scheduled_profile_handler.handler
@@ -297,6 +641,7 @@ Resources:
 
   MusicRecommenderApiErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: DeployLegacy
     Properties:
       AlarmDescription: Music recommender API Lambda reported an error.
       ComparisonOperator: GreaterThanThreshold
@@ -314,6 +659,7 @@ Resources:
 
   MusicRecommenderProfileSyncErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: DeployLegacy
     Properties:
       AlarmDescription: Scheduled Spotify profile sync Lambda reported an error.
       ComparisonOperator: GreaterThanThreshold
@@ -329,32 +675,259 @@ Resources:
       Threshold: 0
       TreatMissingData: notBreaching
 
+  OutsideTheLoopApiErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop API Lambda reported an error.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: OutsideTheLoopApiFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopApiDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop API p95 duration is near its timeout.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: OutsideTheLoopApiFunction
+      EvaluationPeriods: 2
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Period: 300
+      ExtendedStatistic: p95
+      Threshold: 25000
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopWorkerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop discovery worker reported an error.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: OutsideTheLoopDiscoveryWorkerFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopCleanupErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop cleanup function reported an error.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value:
+            Ref: OutsideTheLoopCleanupFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopDiscoveryDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop discovery messages reached the dead-letter queue.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt:
+              - OutsideTheLoopDiscoveryDlq
+              - QueueName
+      EvaluationPeriods: 1
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Period: 300
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopDiscoveryAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop discovery queue age exceeded five minutes.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Fn::GetAtt:
+              - OutsideTheLoopDiscoveryQueue
+              - QueueName
+      EvaluationPeriods: 1
+      MetricName: ApproximateAgeOfOldestMessage
+      Namespace: AWS/SQS
+      Period: 300
+      Statistic: Maximum
+      Threshold: 300
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopApiResponseErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop API returned one or more server errors.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Service
+          Value: product-api
+      EvaluationPeriods: 1
+      MetricName: ApiErrorCount
+      Namespace: OutsideTheLoop/Product
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopDatabaseFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop observed a database readiness or cleanup failure.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Service
+          Value: product-api
+      EvaluationPeriods: 1
+      MetricName: DatabaseFailureCount
+      Namespace: OutsideTheLoop/Product
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopSourceFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop observed an external source failure.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Service
+          Value: discovery-worker
+      EvaluationPeriods: 1
+      MetricName: SourceFailureCount
+      Namespace: OutsideTheLoop/Product
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  OutsideTheLoopSpotifyReconnectAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - Ref: OutsideTheLoopAlarmTopic
+      AlarmDescription: Outside the Loop observed a spike in Spotify reconnect requirements.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Service
+          Value: product-api
+      EvaluationPeriods: 1
+      MetricName: SpotifyReconnectCount
+      Namespace: OutsideTheLoop/Product
+      Period: 300
+      Statistic: Sum
+      Threshold: 2
+      TreatMissingData: notBreaching
+
 Outputs:
+  ProductApiUrl:
+    Description: Base URL for the multi-user Outside the Loop API.
+    Value:
+      Fn::Sub: "https://${OutsideTheLoopHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+  ProductApiFunctionName:
+    Description: Lambda function serving the multi-user product API.
+    Value:
+      Ref: OutsideTheLoopApiFunction
+  DiscoveryWorkerFunctionName:
+    Description: Lambda function processing automated ListenBrainz discovery.
+    Value:
+      Ref: OutsideTheLoopDiscoveryWorkerFunction
+  CleanupFunctionName:
+    Description: Lambda function enforcing product retention.
+    Value:
+      Ref: OutsideTheLoopCleanupFunction
+  DiscoveryQueueUrl:
+    Description: FIFO discovery queue URL.
+    Value:
+      Ref: OutsideTheLoopDiscoveryQueue
+  DiscoveryDlqUrl:
+    Description: Discovery dead-letter queue URL.
+    Value:
+      Ref: OutsideTheLoopDiscoveryDlq
+  TokenKmsKeyArn:
+    Description: KMS key ARN for Spotify tokens and OAuth PKCE verifiers.
+    Value:
+      Fn::GetAtt:
+        - OutsideTheLoopTokenKey
+        - Arn
   ApiUrl:
     Description: Base URL for the deployed API Gateway HTTP API.
+    Condition: DeployLegacy
     Value:
       Fn::Sub: "https://${MusicRecommenderHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
   ApiFunctionName:
     Description: Lambda function name for the API.
+    Condition: DeployLegacy
     Value:
       Ref: MusicRecommenderApiFunction
   ProfileSyncFunctionName:
     Description: Lambda function used for scheduled Spotify profile refresh.
+    Condition: DeployLegacy
     Value:
       Ref: MusicRecommenderProfileSyncFunction
   UsersTableName:
     Description: DynamoDB users table.
+    Condition: DeployLegacy
     Value:
       Ref: MusicRecommenderUsersTable
   SessionsTableName:
     Description: DynamoDB sessions table.
+    Condition: DeployLegacy
     Value:
       Ref: MusicRecommenderSessionsTable
   FeedbackTableName:
     Description: DynamoDB feedback table.
+    Condition: DeployLegacy
     Value:
       Ref: MusicRecommenderFeedbackTable
   PlaylistsTableName:
     Description: DynamoDB playlist idempotency table.
+    Condition: DeployLegacy
     Value:
       Ref: MusicRecommenderPlaylistsTable

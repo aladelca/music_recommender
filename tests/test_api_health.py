@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from music_recommender.api.app import create_app
 
 
-def test_health_reports_config_presence_without_secret_values(
+def test_health_is_shallow_and_does_not_report_config_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret")
@@ -24,26 +24,20 @@ def test_health_reports_config_presence_without_secret_values(
     body = response.json()
     assert body["status"] == "ok"
     assert body["version"] == "0.1.0"
-    assert body["config"] == {
-        "aws_region": "us-east-1",
-        "api_key_required": False,
-        "aws_secrets_prefix_present": True,
-        "music_recommender_bucket_present": True,
-        "openai_api_key_present": True,
-        "recommender_data_mode": "s3",
-        "recommender_data_root_present": True,
-        "runtime_store_backend": "auto",
-        "dynamodb_feedback_table_present": False,
-        "dynamodb_playlists_table_present": False,
-        "dynamodb_sessions_table_present": False,
-        "dynamodb_users_table_present": False,
-        "spotify_client_id_present": True,
-        "spotify_client_secret_present": True,
-        "spotify_user_refresh_token_present": True,
-    }
+    assert set(body) == {"status", "version"}
     assert "sk-test-secret" not in response.text
     assert "spotify-secret" not in response.text
     assert "spotify-refresh" not in response.text
+
+
+def test_readiness_probe_returns_only_ready_or_unavailable() -> None:
+    ready_client = TestClient(create_app(load_env=False, readiness_probe=lambda: True))
+    unavailable_client = TestClient(create_app(load_env=False, readiness_probe=lambda: False))
+
+    assert ready_client.get("/ready").json() == {"status": "ready"}
+    unavailable = unavailable_client.get("/ready")
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"status": "unavailable"}
 
 
 def test_configured_api_key_is_required_for_non_health_routes(

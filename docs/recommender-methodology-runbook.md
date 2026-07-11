@@ -1,282 +1,248 @@
 # Recommender Scientific Methodology Runbook
 
-This runbook defines what the recommender currently computes, how to reproduce a result, and how to
-evaluate changes without overstating evidence. The deployed recommender is a deterministic,
-rule-based hybrid ranker with optional LLM intent parsing and orchestration. It is not a trained
-machine-learning ranking model, and its weights have not yet been statistically calibrated.
+This runbook specifies the implemented Outside the Loop recommender, its evidence rules, and the
+five-user evaluation protocol. The production ranker is deterministic and versioned as
+`explicit-discovery-v1`. It is not a trained machine-learning model and its weights are engineering
+hypotheses, not established causal effects.
 
-## Methodological Claim
+## Product Claim
 
-The implementation operationalizes three hypotheses:
+Outside the Loop tests whether explicit user seeds plus transparent, independent discovery evidence
+can produce recommendations that a small beta group prefers to their usual Spotify discovery
+experience. It does not claim broad superiority or statistical significance.
 
-1. Tracks closer to a prompt-derived mood target are more relevant.
-2. Tracks connected to the user's Spotify behavior are more personally relevant.
-3. A small novelty term and artist-diversity constraint improve list usefulness without overwhelming
-   mood or taste.
+Spotify is not a ranking input. The product does not use Spotify saved tracks, top items, listening
+history, existing playlists, popularity, audio features, or collaborative/profile vectors. Spotify
+is used only for account identity, post-ranking exact track mapping/display, attributed playback
+links, and a user-confirmed playlist write.
 
-These are testable product hypotheses, not validated scientific conclusions. Current constants are
-engineering priors. General effectiveness must be established with offline and online evaluation.
+## Inputs And Unit Of Analysis
 
-## Inputs And Units Of Analysis
+The ranked unit is a MusicBrainz recording MBID. Inputs are:
 
-The unit ranked is a unique Spotify track ID. The candidate set is the union of:
+- One to five MusicBrainz artist/recording seeds explicitly selected by the current account.
+- A user-authored prompt of 2-500 characters.
+- `familiar`, `balanced`, or `adventurous` control.
+- Explicit-content permission.
+- First-party blocked artist/recording MBIDs from that account's feedback.
+- Fresh normalized MusicBrainz and ListenBrainz facts stored in Supabase.
 
-- The selected S3 catalog run, enriched by its selected offline interaction run.
-- Unique tracks captured during the latest live Spotify profile sync.
+No user ID, Spotify profile, external catalog run, local path, S3 URI, CSV, or Parquet file is
+accepted by the product recommendation request.
 
-The cached user profile contains known track IDs, liked track IDs, liked artist names, and
-continuous track/artist affinities. Request-level liked, known, and blocked values are merged into
-that profile for one recommendation call.
+## Automated Candidate Construction
 
-Track features can include Spotify popularity, audio valence, energy, danceability, lyrics
-sentiment, and an offline maximum implicit rating. Live profile-only candidates currently contain
-identity, artists, explicit status, popularity, and Spotify URL; if they are absent from the offline
-catalog, they have no audio, lyrics, or interaction features.
+1. MusicBrainz search resolves explicit artist/recording text to canonical MBIDs.
+2. For recording seeds, canonical artist-credit MBIDs provide artist expansion roots.
+3. ListenBrainz Core artist-radio and tag-radio endpoints return candidate recording MBIDs and
+   source facts.
+4. ListenBrainz recording metadata supplies bounded title, artist credit, release, tag, ISRC, and
+   listener fields when available.
+5. Normalized entities and edges retain source adapter, algorithm version, fetch time, expiry,
+   strength/listener values, and bounded source facts.
+6. Duplicate edges are merged by deterministic source/seed/recording ordering.
 
-## Spotify Profile Construction
+Positive source caches generally expire after seven days; negative results expire after one hour;
+normalized entities can remain fresh for 30 days. The distributed rate limiter enforces the
+MusicBrainz/ListenBrainz call cadence across Lambda instances. Missing/stale data produces a queued,
+degraded, insufficient, or failed state instead of a file fallback.
 
-Profile signals are normalized to `[0, 1]`. When a track or artist appears in more than one source,
-the maximum source weight is retained rather than summing repeated exposure.
+## Prompt Intent
 
-| Spotify source | Track affinity | Artist affinity | Added to liked sets | Added to known tracks |
-| --- | ---: | ---: | --- | --- |
-| Saved track | `1.0` | `0.9` | Track and artists | Yes |
-| Short-term top track | `0.9` | `0.9` | Track and artists | Yes |
-| Medium-term top track | `0.8` | `0.8` | Track and artists | Yes |
-| Long-term top track | `0.7` | `0.7` | Track and artists | Yes |
-| Short/medium/long top artist | N/A | `0.9` / `0.8` / `0.7` | Artist | N/A |
-| Explicitly selected playlist track | `0.6` | `0.6` | No | Yes |
-| General playlist track | `0.4` | `0.4` | No | Yes |
-| Recently played track | `0.3` | `0.3` | No | Yes |
+The default `deterministic-intent-v1` parser normalizes only the user-authored prompt. It assigns a
+label and small tag set for recognized categories such as high-energy, calm/focus, uplifting, or
+balanced exploration. The request's adventure and explicit controls remain authoritative.
 
-Saved and top items are treated as stronger positive evidence. Playlist and recent-play signals are
-treated as familiarity evidence because presence alone does not prove preference. Profile sync
-deduplicates track candidates and records source counts, selected playlists, time ranges, sync time,
-and missing optional scopes for auditability.
+An optional future prompt-only model boundary may receive the normalized prompt string and must
+return a strict label/tag schema. It may not receive account identity, seeds/history, Spotify data,
+candidate records, feedback, or source payloads. No LLM orchestration chooses production tracks.
 
-## Prompt To Mood Intent
+## Eligibility And Diversity
 
-Every request becomes a structured intent with label, target valence, target energy, target
-danceability, explicit-content permission, blocked artists, and rationale.
+A candidate is excluded before scoring when:
 
-The deterministic parser uses these mappings:
+- Its edge does not originate from a currently selected seed.
+- The MusicBrainz recording entity is missing or stale.
+- It is itself a selected seed.
+- Its recording or any credited artist is blocked by this account.
+- The source establishes it as explicit while explicit content is disabled.
 
-| Trigger language | Label | Valence | Energy | Danceability |
-| --- | --- | ---: | ---: | ---: |
-| `break up`, `breakup`, `broke up`, `cheer me up` | `cheer-up` | `0.88` | `0.78` | `0.76` |
-| `party`, `dance`, `workout`, `hype` | `high-energy` | `0.78` | `0.90` | `0.86` |
-| `calm`, `focus`, `study`, `relax` | `calm-focus` | `0.58` | `0.34` | `0.42` |
-| No trigger | `balanced` | `0.65` | `0.62` | `0.62` |
+After sorting, the production selector returns at most one recording per primary artist. Primary
+artist identity is an MBID, not a normalized display name. This is a hard diversity constraint.
 
-The phrases `clean`, `no explicit`, or `family` disable explicit tracks. Text immediately following
-`avoid `, through the next comma or period, becomes one blocked artist name.
+## Frozen Scoring Equation
 
-With `use_openai_agent: true`, the default `gpt-5-nano` intent agent emits the same structured
-fields and is instructed to keep targets between 0 and 1. A second agent orchestrates tools with a
-six-turn limit. It must call the catalog ranker, and guardrails reject final track IDs that were not
-returned by that tool. The LLM can alter the interpreted intent and choose/order a subset of ranked
-IDs, but it cannot introduce tracks outside the candidate catalog.
-
-## Eligibility Rules
-
-Before scoring:
-
-- Duplicate track IDs are removed, keeping the first catalog occurrence.
-- Explicit tracks are removed when the intent disallows explicit content.
-- Tracks matching a blocked artist from either prompt/request or profile are removed.
-
-After scoring, no primary artist can contribute more than two selected tracks. These are hard
-constraints and should have zero violations in evaluation.
-
-## Scoring Model
-
-For each eligible track `i`, the selection score is:
+For candidate `i`:
 
 ```text
-score_i = clamp(
-    0.65 * mood_i
-  + 0.20 * taste_i
-  + 0.05 * novelty_i
-  + 0.10 * popularity_i
-  - diversity_penalty_i,
-  0,
-  1
-)
+score_i =
+    0.35 * prompt_tag_fit_i
+  + bridge_weight(adventure) * seed_bridge_strength_i
+  + discovery_weight(adventure) * discovery_value_i
+  + 0.15 * evidence_quality_i
 ```
 
-### Mood Fit
+Adventure weights are:
 
-For each available audio feature `x` in valence, energy, and danceability:
+| Mode | Seed bridge | Discovery value |
+| --- | ---: | ---: |
+| Familiar | 0.40 | 0.10 |
+| Balanced | 0.30 | 0.20 |
+| Adventurous | 0.20 | 0.30 |
+
+Each component and the total are clamped to `[0, 1]`.
+
+### `prompt_tag_fit`
+
+The component is the fraction of requested intent tags present in normalized entity/edge tags. If
+the parser emits no tags, the neutral prior is `0.5`; unsupported tags contribute zero.
+
+### `seed_bridge_strength`
+
+The component uses the maximum source edge strength. If an edge has no numeric strength, a similar
+artist edge contributes `0.6` and another supported edge contributes `0.5`. More than one distinct
+source adapter adds `0.05` per extra adapter before clamping.
+
+### `discovery_value`
+
+When listener counts are present, the minimum supporting edge count is transformed as:
 
 ```text
-target_fit(x, target) = 1 - min(abs(clamp(x) - clamp(target)), 1)
+popularity_proxy = log(1 + listener_count) / log(1 + 1,000,000)
+discovery_value = 1 - clamp(popularity_proxy)
 ```
 
-The mood component is the arithmetic mean of all available values from:
+This deliberately gives more discovery weight to less-exposed candidates. It is not Spotify
+popularity. If no listener count exists, the neutral value is `0.5` and the evidence card discloses
+the missing support.
 
-- Valence target fit
-- Energy target fit
-- Danceability target fit
-- Lyrics positive probability
-- `1 - lyrics negative probability`
+### `evidence_quality`
 
-Missing components are omitted from the mean. A track with none of these features receives mood
-fit `0.0`, not a neutral value. This materially disadvantages live profile-only tracks that have not
-been enriched in the offline catalog.
+Auditable data completeness contributes:
 
-### Taste Affinity
+| Available fact | Contribution |
+| --- | ---: |
+| Non-placeholder recording title | 0.25 |
+| Artist credit | 0.20 |
+| Tags | 0.15 |
+| At least one source edge | 0.20 |
+| Edge strength or listener count | 0.20 |
 
-```text
-taste_i = clamp(
-    0.55 * any_liked_artist
-  + 0.35 * liked_track
-  + 0.35 * max_matching_artist_affinity
-  + 0.40 * track_affinity
-  + 0.20 * clamp(max_implicit_rating / 5),
-  0,
-  1
-)
-```
+This rewards explainability rather than confidence in user satisfaction.
 
-Artist comparison uses case-folded, accent-normalized names. Contributions can overlap and are
-clamped to `1.0`. The offline implicit rating is not the feedback collected by the API; it comes
-from the selected interaction dataset.
+### Ordering
 
-### Novelty And Popularity
+Candidates sort by descending total, then descending evidence quality, then ascending recording
+MBID. The artist constraint is applied greedily in that order. Given the same database snapshot,
+prompt, controls, preferences, parser/ranking versions, and code, output ordering is deterministic.
 
-`novelty_i` is `0.0` when the track is in the profile's known-track set and `1.0` otherwise.
-`popularity_i` is Spotify popularity divided by 100 and clamped to `[0, 1]`; missing popularity is
-`0.0`.
+## Evidence Cards
 
-### Artist Diversity
+`evidence-v1` permits only five reason kinds:
 
-Selection is greedy. At each position, remaining candidates are rescored with:
+- `selected_seed`: the user's explicit seed MBID.
+- `source_edge`: exact ListenBrainz adapter and algorithm version.
+- `tag_match`: a requested tag actually present in source facts.
+- `listener_support`: a reported listener count tied to an adapter.
+- `source_diversity`: more than one distinct supported adapter.
 
-```text
-diversity_penalty = min(0.15 * already_selected_from_primary_artist, 0.45)
-```
+Each reason has a fixed source and exact detail-key schema. Before persistence, validation checks it
+against the ranked candidate. Missing tag/listener/artist/title/explicit information becomes a
+structured limitation; unsupported prose cannot be stored as evidence. Evidence does not expose
+the internal decimal total as confidence.
 
-The highest adjusted candidate is selected, and candidates from an artist already represented
-twice are excluded. The returned score breakdown contains mood, taste, novelty, popularity,
-diversity penalty, and total. Explanations are deterministic summaries of those computed signals;
-they are not evidence that the track will cause a particular emotional outcome.
+## Post-Ranking Spotify Mapping And Coverage
 
-## Recommendation And Side-Effect Guardrails
+Only after independent ranking does the backend search Spotify for display/export IDs:
 
-- Recommendation IDs must come from the rank tool's candidate output.
-- The API persists a recommendation session before accepting feedback or playlist creation.
-- Feedback and playlist track IDs must belong to that session.
-- `create_playlist: true` creates the candidate and then writes it to Spotify; an optional
-  `playlist_name` replaces the generated name and `playlist_public` controls requested visibility.
-- The Spotify result is stored by session ID before it is returned as `playlist_result`.
-- `POST /playlists` remains available for reviewed subsets and idempotent replay by session ID.
+1. Exact ISRC match, when MusicBrainz/ListenBrainz supplied an ISRC.
+2. Otherwise exact normalized recording title plus credited artist.
+3. Unmapped, duplicate, or disallowed explicit Spotify results are removed without rescoring.
 
-These controls support traceability and prevent an agent or caller from inventing a Spotify track.
-Playlist creation occurs only when the request explicitly sets `create_playlist: true` or calls
-`POST /playlists`.
+Spotify IDs, popularity, search order, and profile fields never affect `score_i`.
 
-## Reproducing A Result
+The result targets ten unique mapped tracks. Status is:
 
-Record all of the following for each experimental run:
+- `ready`: ten returnable tracks and at least 90% verifiable evidence coverage.
+- `degraded`: ten tracks but evidence coverage below 90%.
+- `insufficient`: fewer than ten returnable Spotify mappings.
 
-| Field | Source |
+The response exposes candidate/mapped/evidence counts and limitations so source coverage cannot be
+mistaken for recommendation certainty.
+
+## Feedback Effects
+
+`hide_artist` and recording dislikes update only that account's blocked MBID preferences and affect
+later eligibility. Likes, saves, skips, comments, playlist choices, and evaluation ratings are
+stored for product analysis but do not silently retrain or reweight the frozen ranker. No tester's
+feedback affects another tester.
+
+## Reproducibility Record
+
+For every evaluated session retain:
+
+| Field | Record |
 | --- | --- |
-| Git commit | `git rev-parse HEAD` |
-| Stack/template version | CloudFormation stack and commit |
-| Catalog run ID | `CatalogRunId` stack parameter |
-| Interaction run ID | `InteractionRunId` stack parameter |
-| Profile version | `/profile` `synced_at`, source counts, and time ranges |
-| Prompt and request additions | Recommendation request JSON |
-| Intent path | `use_openai_agent` |
-| Agent model | `OpenAIAgentModel` stack parameter or default |
-| Output | Full recommendation response and `session_id` |
+| Git commit and deployment ID | Git/Vercel/CloudFormation |
+| Parser, ranking, evidence, and source-adapter versions | Recommendation snapshot |
+| Seed IDs/MBIDs and controls | Account-owned session snapshot |
+| Source fetch/expiry and edge facts | Supabase source snapshot |
+| Prompt | Account-owned session only; never operational logs |
+| Ordered recommendation/evidence output | Recommendation items |
+| Mapping source and Spotify ID | Post-ranking mapping snapshot |
+| Review/export outcome | Review and idempotent export records |
 
-The deterministic path is reproducible for the same ordered catalog, profile snapshot, prompt,
-request, and code version. Equal-score ties preserve input ordering, so catalog order is part of the
-effective experiment state. The OpenAI path is not guaranteed to reproduce byte-identical intent or
-ordering even with the same inputs.
+Do not export raw user sessions to local CSV/Parquet/S3. Aggregate beta analysis should query
+Supabase through an approved backend/operator process and emit only non-identifying summaries.
 
-Use [api-usage-runbook.md](api-usage-runbook.md) to capture the profile summary, request, and
-response. Do not commit user profile payloads, access tokens, API keys, or private Spotify data as
-test fixtures.
+## Five-Tester Evaluation Protocol
 
-## Offline Evaluation Protocol
+The first round freezes `explicit-discovery-v1`, `deterministic-intent-v1`, `evidence-v1`, and
+`lb-core-v1`. Each of the five testers completes at least three sessions on separate prompts:
 
-Before changing weights or profile-source rules:
+1. Comfort-zone discovery from explicit favorite-adjacent seeds.
+2. A mood or activity request.
+3. An intentionally adventurous request.
 
-1. Freeze code, catalog run, interaction run, profile snapshot, prompt set, and candidate ordering.
-2. Define relevance from held-out first-party events such as like, save, accepted playlist add, and
-   skip/dislike. Do not use the same event both as a ranking feature and evaluation label.
-3. Split interactions chronologically so training or tuning never sees future behavior.
-4. Compare the candidate change with the current production constants and simple baselines such as
-   popularity-only, mood-only, and taste-only.
-5. Report ranking quality, constraint compliance, coverage, diversity, and latency together.
-6. Run ablations that remove audio, lyrics, Spotify profile, popularity, and each source family.
-7. Preserve per-query outputs so regressions can be inspected, not just averaged.
+Rotate prompt-category order across testers to reduce order/fatigue effects. Before first use,
+collect one baseline satisfaction question about normal discovery. After every session collect:
 
-Recommended ranking metrics are `NDCG@K`, `Recall@K`, `HitRate@K`, and mean reciprocal rank. Report
-catalog coverage, novel-track rate, intra-list artist diversity, maximum artist concentration, and
-mean mood-target distance. Explicit and blocked-artist violation counts must remain zero. Also
-report p50/p95 API latency and dependency failure rate.
+- Better, same, worse, or not sure versus usual Spotify discovery.
+- Explanation usefulness, 1-5.
+- Novelty quality, 1-5.
+- Track selections/removals, feedback events, and whether a playlist was exported.
+- Optional qualitative comment, kept account-scoped and out of logs.
 
-For a single user or small prompt set, report distributions and bootstrap confidence intervals or a
-paired randomization/permutation analysis. Do not present a p-value from repeated recommendations
-to one person as evidence of population-level improvement.
+A bug or behavior change starts a new version/round. Do not tune weights after looking at partial
+round results.
 
-## Online Evaluation Protocol
+## Decision Criteria And Analysis
 
-When there is enough first-party traffic, compare one isolated change at a time. Pre-register the
-primary outcome and stopping rule before examining results. Suitable outcomes include accepted
-recommendation rate, like/save rate, skip/dislike rate, playlist creation rate, and retained tracks
-after a fixed period.
+The product hypothesis passes the exploratory beta when:
 
-Randomize prompt/order effects and use session-level assignment. Keep safety constraints identical
-between variants. Analyze OpenAI intent parsing separately from score-weight changes so an observed
-difference can be attributed to the correct component.
+- At least four testers prefer Outside the Loop in a majority of their rated sessions.
+- Median explanation usefulness is at least 4/5.
+- Every tester accepts at least 20% of recommendations across the protocol.
+- No unresolved evidence-accuracy, cross-account, policy, or wrong-playlist-owner defect remains.
 
-The current single-user deployment cannot support a population A/B test. It can support repeated
-within-user usability trials, but conclusions are personal and exploratory.
+With five testers, analysis is descriptive: report counts, medians, per-user ranges, source/evidence
+coverage, selected-track rate, export rate, return sessions, cache hit rate, and p50/p95 generation
+latency. Do not use null-hypothesis significance tests, population claims, or treat repeated sessions
+from one user as independent people.
 
-## Current Limitations And Biases
+Useful diagnostic comparisons include component ablations, familiar versus adventurous settings,
+source adapter coverage, and mapping/evidence failure categories. They explain behavior but do not
+replace the user comparison outcome.
 
-- Ranking weights and source weights are hand-selected and not calibrated from outcomes.
-- API feedback is persisted but does not update the profile, catalog, or ranker.
-- The S3 seed catalog and profile sync limits determine which music can be discovered.
-- Spotify popularity creates exposure bias toward already popular tracks.
-- Missing audio or lyrics data lowers mood evidence; fully missing mood features score zero.
-- Saved/top/playlist presence is an imperfect proxy for preference and can be stale or contextual.
-- Lyrics sentiment is not equivalent to listener mood and may perform unevenly across languages,
-  genres, irony, and instrumental music.
-- Artist-name normalization can merge or miss ambiguous artist identities.
-- One user's refresh token and behavior cannot justify claims about other users.
-- Agent-based intent parsing introduces external-model drift and nondeterminism.
+## Known Limitations
 
-Future learned ranking should use consented first-party outcomes, chronological train/validation/test
-splits, leakage checks, and a documented model/data version. It should not treat Spotify access
-tokens, private profile payloads, or copyrighted content as training artifacts.
+- Hand-selected weights are not calibrated from relevance judgments.
+- ListenBrainz listener counts and radio results have participation/exposure bias.
+- Less-listened does not necessarily mean novel to a particular tester.
+- Tag quality and coverage vary by genre, language, region, and release.
+- Spotify post-ranking mapping can fail or choose no result despite a valid MusicBrainz recording.
+- Five Development Mode testers cannot establish market-wide superiority.
+- Explicit status may remain unknown until post-ranking mapping.
 
-## Validation Gates
-
-Run the existing implementation tests after a methodology-affecting change:
-
-```bash
-uv run pytest \
-  tests/test_recommender_scoring.py \
-  tests/test_profile_sync.py \
-  tests/test_agent_intent.py \
-  tests/test_agent_orchestrator.py \
-  tests/test_recommendations_api.py
-```
-
-Then run the full quality suite and deployed smoke test before release:
-
-```bash
-uv run ruff format --check src tests
-uv run ruff check src tests
-uv run mypy src tests
-uv run pytest
-
-STACK_NAME=music-recommender-demo \
-AWS_REGION_VALUE=us-east-1 \
-bash scripts/smoke_test_deployed_api.sh
-```
+Any methodology change must add deterministic tests, update the version, rerun source/evidence and
+tenant-isolation tests, rebuild artifacts, and start a new frozen evaluation round.

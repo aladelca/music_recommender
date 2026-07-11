@@ -131,5 +131,125 @@ def test_sam_template_enables_operational_logs_alarms_and_table_recovery() -> No
         assert alarm["Dimensions"] == [{"Name": "FunctionName", "Value": {"Ref": function_name}}]
 
 
+def test_sam_template_defines_isolated_multi_user_product_runtime() -> None:
+    template = _load_template()
+    resources = template["Resources"]
+    parameters = template["Parameters"]
+    outputs = template["Outputs"]
+
+    assert parameters["ProductAuthMode"]["AllowedValues"] == ["hybrid", "spotify_session"]
+    assert parameters["EnableReservedConcurrency"]["Default"] == "false"
+    assert parameters["AppBaseUrl"]["AllowedPattern"].startswith("^https://")
+    assert parameters["MusicBrainzContactEmail"]["AllowedPattern"]
+    assert "[:space:]" not in parameters["MusicBrainzContactEmail"]["AllowedPattern"]
+    assert resources["OutsideTheLoopHttpApi"]["Type"] == "AWS::Serverless::HttpApi"
+    assert resources["OutsideTheLoopTokenKey"]["Type"] == "AWS::KMS::Key"
+    assert resources["OutsideTheLoopTokenKey"]["Properties"]["EnableKeyRotation"] is True
+    assert resources["OutsideTheLoopDiscoveryQueue"]["Properties"]["FifoQueue"] is True
+    assert resources["OutsideTheLoopDiscoveryDlq"]["Properties"]["FifoQueue"] is True
+
+    api = resources["OutsideTheLoopApiFunction"]["Properties"]
+    assert api["CodeUri"] == "../.lambda-build/product-api"
+    assert api["Handler"] == "music_recommender.api.product_lambda_handler.handler"
+    assert api["ReservedConcurrentExecutions"] == {
+        "Fn::If": ["UseProductReservedConcurrency", 5, {"Ref": "AWS::NoValue"}]
+    }
+    api_env = api["Environment"]["Variables"]
+    assert api_env["RUNTIME_STORE_BACKEND"] == "supabase"
+    assert api_env["AUTH_MODE"] == {"Ref": "ProductAuthMode"}
+    assert api_env["APP_BASE_URL"] == {"Ref": "AppBaseUrl"}
+    assert api_env["SPOTIFY_TOKEN_KMS_KEY_ID"] == {"Fn::GetAtt": ["OutsideTheLoopTokenKey", "Arn"]}
+    assert api_env["SPOTIFY_PRODUCT_SCOPES"] == (
+        "user-read-private playlist-modify-private playlist-modify-public"
+    )
+    assert api_env["DISCOVERY_QUEUE_URL"] == {"Ref": "OutsideTheLoopDiscoveryQueue"}
+    assert "secretsmanager" in str(api_env["SUPABASE_DB_URL"])
+    assert "secretsmanager" in str(api_env["SPOTIFY_APP_CLIENT_SECRET"])
+    assert "secretsmanager" in str(api_env["OBSERVABILITY_HASH_KEY"])
+    assert not any("S3" in key or "BUCKET" in key or "DATA_ROOT" in key for key in api_env)
+    api_policy = json.dumps(api["Policies"])
+    assert "kms:Decrypt" in api_policy
+    assert "kms:Encrypt" in api_policy
+    assert "sqs:SendMessage" in api_policy
+    assert "s3:" not in api_policy.lower()
+
+    worker = resources["OutsideTheLoopDiscoveryWorkerFunction"]["Properties"]
+    assert worker["CodeUri"] == "../.lambda-build/discovery-worker"
+    assert worker["Handler"] == "music_recommender.api.discovery_worker_handler.handler"
+    assert worker["ReservedConcurrentExecutions"] == {
+        "Fn::If": ["UseProductReservedConcurrency", 2, {"Ref": "AWS::NoValue"}]
+    }
+    assert worker["Events"]["DiscoveryQueue"]["Properties"]["FunctionResponseTypes"] == [
+        "ReportBatchItemFailures"
+    ]
+    assert "MaximumBatchingWindowInSeconds" not in worker["Events"]["DiscoveryQueue"]["Properties"]
+    assert "s3:" not in json.dumps(worker.get("Policies", [])).lower()
+    assert not any(
+        "S3" in key or "BUCKET" in key or "DATA_ROOT" in key
+        for key in worker["Environment"]["Variables"]
+    )
+
+    cleanup = resources["OutsideTheLoopCleanupFunction"]["Properties"]
+    assert cleanup["CodeUri"] == "../.lambda-build/cleanup"
+    assert cleanup["Handler"] == "music_recommender.api.cleanup_handler.handler"
+    assert cleanup["ReservedConcurrentExecutions"] == {
+        "Fn::If": ["UseProductReservedConcurrency", 1, {"Ref": "AWS::NoValue"}]
+    }
+    assert cleanup["Events"]["DailyCleanup"]["Properties"]["Schedule"] == {
+        "Ref": "CleanupScheduleExpression"
+    }
+    assert "s3:" not in json.dumps(cleanup.get("Policies", [])).lower()
+
+    assert outputs["ProductApiUrl"]["Value"] == {
+        "Fn::Sub": (
+            "https://${OutsideTheLoopHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+        )
+    }
+    assert outputs["DiscoveryDlqUrl"]["Value"] == {"Ref": "OutsideTheLoopDiscoveryDlq"}
+
+
+def test_product_runtime_has_queue_database_and_lambda_alarms_without_sensitive_logs() -> None:
+    template = _load_template()
+    resources = template["Resources"]
+    access_log = resources["OutsideTheLoopHttpApi"]["Properties"]["AccessLogSettings"]
+
+    assert "authorization" not in access_log["Format"].lower()
+    assert "cookie" not in access_log["Format"].lower()
+    assert "querystring" not in access_log["Format"].lower()
+    for alarm_name in (
+        "OutsideTheLoopApiErrorsAlarm",
+        "OutsideTheLoopApiDurationAlarm",
+        "OutsideTheLoopWorkerErrorsAlarm",
+        "OutsideTheLoopCleanupErrorsAlarm",
+        "OutsideTheLoopDiscoveryDlqAlarm",
+        "OutsideTheLoopDatabaseFailureAlarm",
+        "OutsideTheLoopSourceFailureAlarm",
+        "OutsideTheLoopSpotifyReconnectAlarm",
+    ):
+        assert resources[alarm_name]["Type"] == "AWS::CloudWatch::Alarm"
+
+    assert resources["OutsideTheLoopDatabaseFailureAlarm"]["Properties"]["Namespace"] == (
+        "OutsideTheLoop/Product"
+    )
+    assert resources["OutsideTheLoopAlarmTopic"]["Type"] == "AWS::SNS::Topic"
+    assert resources["OutsideTheLoopAlarmSubscription"]["Properties"]["Endpoint"] == {
+        "Ref": "MusicBrainzContactEmail"
+    }
+    alarm_action = {"Ref": "OutsideTheLoopAlarmTopic"}
+    for alarm_name in (
+        "OutsideTheLoopApiErrorsAlarm",
+        "OutsideTheLoopApiDurationAlarm",
+        "OutsideTheLoopWorkerErrorsAlarm",
+        "OutsideTheLoopCleanupErrorsAlarm",
+        "OutsideTheLoopDiscoveryDlqAlarm",
+        "OutsideTheLoopDiscoveryAgeAlarm",
+        "OutsideTheLoopApiResponseErrorsAlarm",
+        "OutsideTheLoopDatabaseFailureAlarm",
+        "OutsideTheLoopSourceFailureAlarm",
+        "OutsideTheLoopSpotifyReconnectAlarm",
+    ):
+        assert alarm_action in resources[alarm_name]["Properties"]["AlarmActions"]
+
+
 def _load_template() -> dict[str, Any]:
     return cast(dict[str, Any], yaml.safe_load(Path("infra/template.yaml").read_text()))

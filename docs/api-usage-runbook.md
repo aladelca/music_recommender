@@ -1,312 +1,249 @@
-# Deployed API Usage Runbook
+# Product API Usage Runbook
 
-This runbook covers the secured, single-user API deployed by the
-`music-recommender-demo` CloudFormation stack in `us-east-1`. The current endpoint is
-`https://4bds6ddj39.execute-api.us-east-1.amazonaws.com/`.
+Outside the Loop is a browser-session API exposed through the Vercel production origin. Use
+`https://<project>.vercel.app/api` as the API base. Calls made directly to API Gateway use the same
+paths without `/api`, but normal clients should use Vercel so OAuth cookies remain same-origin.
 
-The interactive OpenAPI UI is public at `/docs`. The profile, recommendation, feedback, and
-playlist routes require `X-API-Key`. The API key authenticates the caller to the one configured
-Spotify account; it is not a multi-user Spotify login flow.
+There is no product API key. `RECOMMENDER_API_KEY` and `X-API-Key` belong only to the disabled
+legacy demo. Product ownership is derived from the authenticated `__Host-mr_session` cookie; a
+caller cannot choose a Spotify user or account ID in request JSON.
 
-## Prerequisites
+## Authentication
 
-- AWS CLI access that can read the stack outputs and runtime secret
-- `curl` and `jq`
-- Permission to use the recommender API key
-- Spotify credentials and refresh token already provisioned in the deployed runtime secret
+Open this URL in a browser:
 
-Do not print, log, commit, or place the API key directly in a curl command. Command arguments can be
-visible to other local processes.
+```text
+https://<project>.vercel.app/api/auth/spotify/start?return_to=/discover
+```
 
-## Prepare A Secure Shell Session
+After Spotify consent, the callback creates or updates a pending account and sets:
 
-Resolve the deployed URL and write the API key to a mode-restricted curl header file. The secret is
-removed automatically when the shell exits.
+- `__Host-mr_session`: secure, HTTP-only opaque application session.
+- `__Host-mr_csrf`: secure double-submit CSRF token readable by the frontend.
+
+The first login is pending until an operator approves the Spotify account. After approval, sign in
+again or refresh `/auth/me`. The playlist is always created in the same Spotify account used to sign in. Spotify top items, saved tracks, recent plays, and playlists are not read.
+
+Check the session:
 
 ```bash
-export AWS_REGION_VALUE=us-east-1
-export STACK_NAME=music-recommender-demo
-export RUNTIME_SECRET_NAME=music-recommender/demo/runtime
+export APP_ORIGIN=https://<project>.vercel.app
+export API_BASE="$APP_ORIGIN/api"
+curl -fsS --cookie-jar /tmp/outside-loop-cookies "$API_BASE/auth/me" | jq .
+```
 
-export API_URL="$(aws cloudformation describe-stacks \
-  --region "$AWS_REGION_VALUE" \
-  --stack-name "$STACK_NAME" \
-  --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue | [0]' \
-  --output text)"
-export API_URL="${API_URL%/}"
+The browser is the supported OAuth client. For curl or Postman, first sign in through the browser,
+then import its two opaque Outside the Loop cookies into a private local cookie jar. Never share or
+commit either value. A mutation must send both cookies, an exact `Origin`, and `X-CSRF-Token` equal
+to the decoded `__Host-mr_csrf` cookie.
 
+For curl, create a mode-restricted header file without printing values:
+
+```bash
 umask 077
-export API_WORK_DIR="$(mktemp -d)"
-export AUTH_HEADER_FILE="$API_WORK_DIR/auth-header"
-trap 'rm -rf "$API_WORK_DIR"' EXIT
-
-runtime_secret="$(aws secretsmanager get-secret-value \
-  --region "$AWS_REGION_VALUE" \
-  --secret-id "$RUNTIME_SECRET_NAME" \
-  --query SecretString \
-  --output text)"
-api_key="$(printf '%s' "$runtime_secret" | jq -er \
-  '.RECOMMENDER_API_KEY | select(type == "string" and length >= 32)')"
-printf 'X-API-Key: %s\n' "$api_key" > "$AUTH_HEADER_FILE"
-unset runtime_secret api_key
+export SESSION_COOKIE='<value from browser cookie storage>'
+export CSRF_TOKEN='<decoded __Host-mr_csrf value>'
+export AUTH_HEADERS="$(mktemp)"
+trap 'rm -f "$AUTH_HEADERS"; unset SESSION_COOKIE CSRF_TOKEN' EXIT
+printf 'Cookie: __Host-mr_session=%s; __Host-mr_csrf=%s\nOrigin: %s\nX-CSRF-Token: %s\n' \
+  "$SESSION_COOKIE" "$CSRF_TOKEN" "$APP_ORIGIN" "$CSRF_TOKEN" > "$AUTH_HEADERS"
 ```
 
-For a client outside the deployment team, deliver the key through an approved secret-management
-channel. Do not grant that client AWS Secrets Manager access merely to call this API.
+GET requests require only the session cookie; using the same header file for examples is safe.
 
-## Check Health And Authentication
+## Postman Setup
 
-`GET /health`, `/docs`, `/redoc`, and `/openapi.json` are public. Health reports configuration
-presence only, never credential values.
+1. Create `app_origin` as the exact Vercel origin and `api_base` as `{{app_origin}}/api`.
+2. In Postman's cookie manager, add `__Host-mr_session` and `__Host-mr_csrf` for the Vercel host.
+3. Create a private environment value `csrf_token` equal to the decoded CSRF cookie.
+4. For `POST`, `PUT`, and `DELETE`, add `Origin: {{app_origin}}` and
+   `X-CSRF-Token: {{csrf_token}}`.
+5. Use `Content-Type: application/json` for JSON bodies. Add `Idempotency-Key` where documented.
+
+Do not put the Spotify client secret, Supabase DSN, refresh token, or an AWS secret in Postman.
+
+## Health And Current User
 
 ```bash
-curl -fsS "$API_URL/health" | jq '{status, version, config}'
+curl -fsS "$API_BASE/health" | jq .
+curl -fsS "$API_BASE/ready" | jq .
+curl -fsS -H "@$AUTH_HEADERS" "$API_BASE/auth/me" | jq .
 ```
 
-A protected request without the header must return HTTP `401`:
+`/health` is shallow. `/ready` checks the backend database and returns `503` without configuration
+details when unavailable. Product OpenAPI/docs routes are intentionally disabled.
+
+## Select Explicit Seeds
+
+Search MusicBrainz for an artist or recording. Search text is bounded and is not a Spotify profile
+query:
 
 ```bash
-curl -sS \
-  --output "$API_WORK_DIR/unauthorized.json" \
-  --write-out 'HTTP %{http_code}\n' \
-  "$API_URL/profile"
-jq . "$API_WORK_DIR/unauthorized.json"
+curl -fsS -H "@$AUTH_HEADERS" --get \
+  --data-urlencode 'q=Portishead' \
+  --data-urlencode 'type=artist' \
+  "$API_BASE/music/search" | jq .
 ```
 
-The expected body is `{"detail":"Invalid API key."}`.
-
-## Sync The Spotify Profile
-
-`POST /profile/sync` refreshes the configured Spotify user's profile and writes it to DynamoDB. It
-can read saved tracks, top tracks and artists, selected or current-user playlists, and optionally
-recently played tracks. This route calls Spotify synchronously and can take longer than a
-recommendation.
+Confirm one to five returned MBIDs:
 
 ```bash
-cat > "$API_WORK_DIR/profile-sync-request.json" <<'JSON'
-{
-  "top_limit": 20,
-  "saved_limit": 20,
-  "top_time_ranges": ["short_term", "medium_term", "long_term"],
-  "include_playlists": true,
-  "playlist_limit": 10,
-  "playlist_track_limit": 50,
-  "playlist_ids": [],
-  "include_recently_played": false,
-  "recently_played_limit": 20,
-  "market": null
-}
-JSON
+curl -fsS -X PUT -H "@$AUTH_HEADERS" -H 'Content-Type: application/json' \
+  --data '{
+    "seeds": [
+      {"entity_type": "artist", "mbid": "8ab7aa79-24a4-4a5f-b2c6-3e3c2c7af95c"}
+    ]
+  }' \
+  "$API_BASE/me/seeds" | tee /tmp/outside-loop-seeds.json | jq .
+```
 
-curl -fsS \
-  -H "@$AUTH_HEADER_FILE" \
-  -H 'Content-Type: application/json' \
-  --data @"$API_WORK_DIR/profile-sync-request.json" \
-  --output "$API_WORK_DIR/profile-sync.json" \
-  "$API_URL/profile/sync"
+The returned seed `id` is an application UUID; recommendation requests use that ID, not the MBID.
 
+## Populate Automated Discovery Data
+
+`POST /api/discovery/jobs` queues MusicBrainz/ListenBrainz expansion from the current user's seeds:
+
+```bash
+curl -fsS -X POST -H "@$AUTH_HEADERS" \
+  "$API_BASE/discovery/jobs" | tee /tmp/outside-loop-job.json | jq .
+
+export JOB_ID="$(jq -er '.id' /tmp/outside-loop-job.json)"
+curl -fsS -H "@$AUTH_HEADERS" \
+  "$API_BASE/discovery/jobs/$JOB_ID" | jq .
+```
+
+Poll with bounded delay until `status` is `ready`, `degraded`, or `failed`. A retryable source
+outage never falls back to local files or S3.
+
+## Get Recommendations
+
+`POST /api/me/recommendations` generates and snapshots an account-owned result:
+
+```bash
+export SEED_ID="$(jq -er '.seeds[0].id' /tmp/outside-loop-seeds.json)"
+
+jq -n --arg seed_id "$SEED_ID" '{
+  prompt: "Atmospheric trip hop for late-night focus",
+  adventure: "balanced",
+  allow_explicit: false,
+  seed_ids: [$seed_id]
+}' > /tmp/outside-loop-recommendation-request.json
+
+curl -fsS -X POST -H "@$AUTH_HEADERS" -H 'Content-Type: application/json' \
+  --data @/tmp/outside-loop-recommendation-request.json \
+  "$API_BASE/me/recommendations" \
+  | tee /tmp/outside-loop-recommendation.json \
+  | jq '{id, status, ranking_version, source_coverage, recommendations}'
+```
+
+The accepted values for `adventure` are `familiar`, `balanced`, and `adventurous`. Recommendation
+generation is read-only with respect to Spotify. There is deliberately no `create_playlist` field.
+Every result contains structured evidence and limitations; Spotify IDs are resolved only after the
+independent ranking is complete.
+
+## Review And Name The Playlist
+
+The review request selects and orders one to ten recommendation MBIDs. It also freezes the exact
+playlist name and visibility that the export must match:
+
+```bash
+export SESSION_ID="$(jq -er '.id' /tmp/outside-loop-recommendation.json)"
 jq '{
-  source,
-  synced_at,
-  source_counts,
-  time_ranges,
-  playlist_sources,
-  missing_optional_scopes
-}' "$API_WORK_DIR/profile-sync.json"
+  recording_mbids: [.recommendations[0:5][].recording_mbid],
+  playlist_name: "Late Night Outside the Loop",
+  public: true
+}' /tmp/outside-loop-recommendation.json > /tmp/outside-loop-review.json
+
+curl -fsS -X PUT -H "@$AUTH_HEADERS" -H 'Content-Type: application/json' \
+  --data @/tmp/outside-loop-review.json \
+  "$API_BASE/me/recommendations/$SESSION_ID/selection" \
+  | tee /tmp/outside-loop-reviewed.json | jq .
 ```
 
-Use `playlist_ids` to restrict playlist ingestion to explicitly selected Spotify playlist IDs. A
-missing optional scope is reported in `missing_optional_scopes`; accessible profile sources are
-still cached.
+## Export To Spotify
 
-## Inspect Cached Profile Status
-
-Use the status route to confirm freshness without printing the user's full taste profile:
+This is the only recommendation workflow that creates a playlist. `name`, `public`, and ordered
+`recording_mbids` must equal the reviewed values. Use a new stable idempotency key for one logical
+export and reuse it only when retrying the identical payload:
 
 ```bash
-curl -fsS \
-  -H "@$AUTH_HEADER_FILE" \
-  --output "$API_WORK_DIR/profile.json" \
-  "$API_URL/profile"
-
+export IDEMPOTENCY_KEY="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 jq '{
-  present,
-  source,
-  synced_at,
-  source_counts,
-  time_ranges,
-  missing_optional_scopes,
-  liked_track_count: (.profile.liked_track_ids | length),
-  known_track_count: (.profile.known_track_ids | length),
-  liked_artist_count: (.profile.liked_artist_names | length)
-}' "$API_WORK_DIR/profile.json"
+  name: .review.playlist_name,
+  description: "Created from reviewed Outside the Loop recommendations",
+  public: .review.public,
+  recording_mbids: [.recommendations[] | select(.selected) | .recording_mbid]
+}' /tmp/outside-loop-reviewed.json > /tmp/outside-loop-export.json
+
+curl -fsS -X POST -H "@$AUTH_HEADERS" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  --data @/tmp/outside-loop-export.json \
+  "$API_BASE/me/recommendations/$SESSION_ID/playlist" | jq .
 ```
 
-Before the first successful sync, the route returns `present: false`, `profile: null`, and
-`synced_at: null`.
+HTTP `201` means a new export completed; `200` with `idempotent_replay: true` means the identical
+operation was already completed. Open `spotify_playlist_url` to verify the explicit name,
+visibility, order, and owner in Spotify. A partial failure is persisted so retry cannot silently
+create duplicates.
 
-## Request Recommendations
-
-The default deterministic path parses the prompt with local rules and ranks only catalog-backed or
-synced Spotify-profile tracks.
-
-```bash
-cat > "$API_WORK_DIR/recommendation-request.json" <<'JSON'
-{
-  "prompt": "Give me upbeat, clean songs that still feel emotionally honest",
-  "limit": 5,
-  "create_playlist": false,
-  "playlist_name": null,
-  "playlist_public": true,
-  "use_openai_agent": false,
-  "liked_artist_names": [],
-  "liked_track_ids": [],
-  "known_track_ids": [],
-  "blocked_artist_names": []
-}
-JSON
-
-curl -fsS \
-  -H "@$AUTH_HEADER_FILE" \
-  -H 'Content-Type: application/json' \
-  --data @"$API_WORK_DIR/recommendation-request.json" \
-  --output "$API_WORK_DIR/recommendation.json" \
-  "$API_URL/recommendations"
-
-jq '{
-  session_id,
-  intent,
-  recommendations: [
-    .recommendations[] | {
-      track_id: .track.id,
-      name: .track.name,
-      artists: .track.artist_names,
-      spotify_url: .track.spotify_url,
-      score: .score,
-      explanation: .explanation
-    }
-  ],
-  playlist_candidate,
-  playlist_result
-}' "$API_WORK_DIR/recommendation.json"
-```
-
-Set `use_openai_agent` to `true` to use the configured OpenAI model for structured intent parsing
-and orchestration. The final IDs are still constrained to tracks returned by the deterministic
-catalog-ranking tool. An OpenAI outage affects only requests that enable this option.
-
-Request-level `liked_*`, `known_track_ids`, and `blocked_artist_names` values augment the cached
-profile for that request. `catalog_run_id`, `interaction_run_id`, and `demo_user_id` are operational
-overrides; normal callers should rely on the deployment defaults.
-
-Setting `create_playlist: true` persists the recommendation session and immediately creates the
-Spotify playlist from all returned candidate tracks. Add `playlist_name` to replace the generated
-`Music Recommender - <intent>` name. `playlist_public` defaults to `true`:
+Postman raw export body:
 
 ```json
 {
-  "prompt": "Give me upbeat songs that still feel emotionally honest",
-  "limit": 5,
-  "create_playlist": true,
-  "playlist_name": "Adrian's Upbeat Mix",
-  "playlist_public": true,
-  "use_openai_agent": false
+  "name": "Late Night Outside the Loop",
+  "description": "Created from reviewed Outside the Loop recommendations",
+  "public": true,
+  "recording_mbids": ["<reviewed-recording-mbid>"]
 }
 ```
 
-`playlist_name` must be non-empty when supplied and has no effect when `create_playlist` is false.
-The response includes `playlist_result` with the Spotify playlist ID, URL, tracks added, snapshot
-ID, idempotency state, and partial failures. Set `playlist_public` to `false` to request a private
-playlist.
+## Feedback, Evaluation, And History
 
-## Record Feedback
-
-Feedback must reference a session and track returned by the recommendation response. Supported
-event types are `like`, `dislike`, `hide_artist`, `save`, `skip`, and `refine`.
+Record account-scoped item feedback:
 
 ```bash
-session_id="$(jq -er '.session_id' "$API_WORK_DIR/recommendation.json")"
-track_id="$(jq -er '.recommendations[0].track.id' "$API_WORK_DIR/recommendation.json")"
-
-jq -n \
-  --arg session_id "$session_id" \
-  --arg track_id "$track_id" \
-  '{
-    session_id: $session_id,
-    track_id: $track_id,
-    event_type: "like",
-    metadata: {source: "manual-api-runbook"}
-  }' > "$API_WORK_DIR/feedback-request.json"
-
-curl -fsS \
-  -H "@$AUTH_HEADER_FILE" \
-  -H 'Content-Type: application/json' \
-  --data @"$API_WORK_DIR/feedback-request.json" \
-  "$API_URL/feedback" | jq .
+export RECORDING_MBID="$(jq -er '.recommendations[0].recording_mbid' /tmp/outside-loop-recommendation.json)"
+curl -fsS -X POST -H "@$AUTH_HEADERS" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: feedback-$SESSION_ID-$RECORDING_MBID-like" \
+  --data "{\"recording_mbid\":\"$RECORDING_MBID\",\"event_type\":\"like\"}" \
+  "$API_BASE/me/recommendations/$SESSION_ID/feedback" | jq .
 ```
 
-The response contains `event_id` and `status: "recorded"`. Feedback is persisted for analysis but
-is not yet folded back into profile weights or ranking.
-
-## Create Or Retry A Spotify Playlist Explicitly
-
-Use `POST /playlists` when `create_playlist` was false and you want to review or select a subset of
-tracks first. It can also safely replay a session that already created a playlist automatically.
-Track IDs must be a non-empty subset from the same recommendation session.
+Save the frozen beta evaluation:
 
 ```bash
-session_id="$(jq -er '.session_id' "$API_WORK_DIR/recommendation.json")"
+curl -fsS -X PUT -H "@$AUTH_HEADERS" -H 'Content-Type: application/json' \
+  --data '{
+    "comparison": "better",
+    "explanation_usefulness": 5,
+    "novelty_quality": 4,
+    "comment": null
+  }' \
+  "$API_BASE/me/recommendations/$SESSION_ID/evaluation" | jq .
 
-jq -n \
-  --arg session_id "$session_id" \
-  --arg name "Music Recommender - Runbook Test" \
-  --argjson track_ids "$(jq -c '[.recommendations[].track.id] | .[:3]' \
-    "$API_WORK_DIR/recommendation.json")" \
-  '{
-    session_id: $session_id,
-    name: $name,
-    description: "Created after reviewing API recommendations",
-    track_ids: $track_ids,
-    public: false
-  }' > "$API_WORK_DIR/playlist-request.json"
-
-curl -fsS \
-  -H "@$AUTH_HEADER_FILE" \
-  -H 'Content-Type: application/json' \
-  --data @"$API_WORK_DIR/playlist-request.json" \
-  --output "$API_WORK_DIR/playlist.json" \
-  "$API_URL/playlists"
-jq . "$API_WORK_DIR/playlist.json"
+curl -fsS -H "@$AUTH_HEADERS" "$API_BASE/me/recommendations?limit=20" | jq .
 ```
 
-The response includes `playlist_id`, `url`, `tracks_added`, `snapshot_id`, `partial_failures`, and
-`idempotent_replay`. The session ID is the idempotency key: replaying the request returns the stored
-result with `idempotent_replay: true` instead of creating another playlist.
-
-## Request Limits And Errors
-
-| Condition | Response |
-| --- | --- |
-| Missing or invalid `X-API-Key` | `401` |
-| Invalid session/track relationship or domain input | `400` |
-| Unknown recommendation session | `404` |
-| Invalid JSON schema, field type, or range | `422` |
-| Missing runtime configuration | `503` |
-| Unhandled dependency or application failure | `500` |
-
-`limit` accepts 1 through 50. Profile source limits and allowed values are documented by the live
-OpenAPI schema at `$API_URL/docs`.
-
-For a failed call, capture the status and body without exposing request headers:
+## Logout And Deletion
 
 ```bash
-curl -sS \
-  -H "@$AUTH_HEADER_FILE" \
-  --output "$API_WORK_DIR/error.json" \
-  --write-out 'HTTP %{http_code}\n' \
-  "$API_URL/profile"
-jq . "$API_WORK_DIR/error.json"
+curl -fsS -X POST -H "@$AUTH_HEADERS" "$API_BASE/auth/logout"
+
+curl -fsS -X DELETE -H "@$AUTH_HEADERS" -H 'Content-Type: application/json' \
+  --data '{"confirmation":"DELETE"}' "$API_BASE/auth/me"
 ```
 
-Use [operational-aws-runbook.md](operational-aws-runbook.md) to inspect Lambda and API Gateway logs
-or run the complete deployed smoke suite.
+Deletion removes account-owned application data and encrypted token ciphertext. It does not delete
+playlists already present in Spotify.
+
+## Security And Error Contract
+
+- `401`: missing, expired, or revoked application session.
+- `403`: pending/revoked beta access, Origin failure, CSRF failure, or Spotify permission failure.
+- `404`: unknown or Cross-account seed/session/item IDs. The API does not reveal other users' data.
+- `409`: review/idempotency conflict or Spotify reconnection required.
+- `422`: schema validation failure or forbidden extra field.
+- `502/503`: bounded Spotify/source/database failure with a stable `code`.
+
+Capture `X-Request-ID`, status, route, and stable error `code` when reporting an incident. Never
+attach cookies, headers, prompts tied to an account, tokens, provider payloads, or free-text comments.

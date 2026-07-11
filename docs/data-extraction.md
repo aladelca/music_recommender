@@ -1,5 +1,30 @@
 # Data Extraction
 
+## Product Runtime (Authoritative)
+
+The Outside the Loop product does not extract, upload, or read catalog datasets from local disk or
+S3. It does not deploy CSV or Parquet data. Runtime data moves through bounded HTTPS API calls and
+normalized Supabase Postgres records only:
+
+1. MusicBrainz search resolves explicit user-selected artist or recording MBIDs.
+2. ListenBrainz Core artist/tag radio expands those seeds into recording MBIDs.
+3. ListenBrainz recording metadata supplies title, artist credit, ISRC, release, and tag facts.
+4. The backend ranks independent candidates before any Spotify lookup.
+5. Spotify track search maps only the ranked MBIDs needed for attributed display and playlist
+   export. Spotify popularity and user profile/listening data are not ranking inputs.
+
+Positive MusicBrainz and ListenBrainz responses, negative lookups, canonical entities, candidate
+edges, and Spotify mappings are stored in Supabase with explicit expiries. The deployment package
+gate rejects `.csv` and `.parquet` files. `scripts/audit_beta_sources.py` queries Supabase directly
+and emits aggregate coverage to stdout; it creates no data file.
+
+## Legacy Offline Pipeline
+
+The sections below describe the pre-product experimentation pipeline. That code is retained for
+reproducibility and rollback only. Its local/S3 medallion datasets, Spotify profile extraction,
+ListenBrainz dumps, ReccoBeats, and lyric features are not reachable from product routes or product
+Lambda functions and must not be included in product deployment artifacts.
+
 ## Sources
 
 - Spotify: catalog metadata, artist resolution, albums, tracks, popularity, URLs, and ISRCs.

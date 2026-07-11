@@ -1,283 +1,206 @@
-# Natural Language Music Recommender Architecture
-
-## Topic
-
-Design direction for a music recommender where a user can describe what they want in natural
-language, for example: "I just broke up with my girlfriend and I want songs to cheer me up."
-
-The system should recommend Spotify-playable songs that fit the current mood and goal while taking
-into account the user's existing taste.
+# Outside the Loop Recommender Architecture
 
 ## Objective
 
-Build a recommender that feels conversational at the entry point but remains deterministic,
-inspectable, and testable in the recommendation engine.
+Outside the Loop is an explainable music-discovery product for a five-user beta. A user signs in
+with Spotify, explicitly chooses artist or recording seeds, describes the desired listening
+session, reviews evidence-backed recommendations, and exports the selected order to their own
+Spotify account.
 
-The target experience is:
+The recommendation engine is deterministic and auditable. Spotify is an identity, attribution, and
+playlist-export integration, not the source of taste profiles or ranking features.
 
-1. The user authenticates with Spotify.
-2. The app learns from consented user signals such as saved tracks, top artists, top tracks,
-   recent plays, and app-specific feedback.
-3. The user enters a natural-language request.
-4. The system converts that request into a structured music intent.
-5. The recommender returns tracks with short, grounded explanations and refinement controls.
-6. The user can save the result as a Spotify playlist or ask for adjustments.
+## Product Boundary
 
-## Current Repo Fit
+The product must:
 
-This repository already has the foundation for an offline data and feature pipeline:
+- Use explicit user choices rather than Spotify top, saved, recent, or playlist history.
+- Retrieve music entities and candidates from automated independent HTTPS APIs.
+- Persist product state and external API caches only in Supabase Postgres.
+- Avoid local and S3 catalog files in every product runtime path.
+- Render evidence from stored source facts rather than LLM-generated claims.
+- Require review and confirmation before any Spotify playlist write.
 
-- Spotify catalog extraction in `src/music_recommender/sources/spotify.py`.
-- ReccoBeats audio feature ingestion in `src/music_recommender/sources/reccobeats.py`.
-- Lyrics ingestion through LRCLIB and lyrics.ovh.
-- Lyrics language and sentiment enrichment in `src/music_recommender/nlp/`.
-- ListenBrainz public listen data ingestion in `src/music_recommender/pipeline/network.py`.
-- Local and S3 medallion storage for bronze, silver, and gold datasets.
+The detailed policy decision is in `docs/spotify-policy-assessment.md`.
 
-The missing product layer is the online recommendation system:
+## User Flow
 
-- Spotify user OAuth.
-- User profile sync.
-- Natural-language intent parsing.
-- Candidate generation.
-- Ranking and diversification.
-- Feedback capture.
-- API and UI.
+1. The user authenticates with Spotify and receives an application session.
+2. An administrator approves the pending account within the five-user limit.
+3. The user searches for one to five artist or recording seeds.
+4. MusicBrainz resolves the search to stable artist/recording MBIDs.
+5. The user enters a prompt and chooses adventure and explicit-content controls.
+6. ListenBrainz artist/tag APIs expand the explicit seeds into candidate recording MBIDs.
+7. The backend filters, ranks, diversifies, and builds evidence from independent source facts.
+8. The user removes and reorders tracks and explicitly names the playlist.
+9. The backend maps selected MBIDs to Spotify IDs, creates `/me/playlists`, and adds `/items`.
+10. The user rates recommendation and explanation quality.
 
-## Spotify Constraints
+## Automated Data Sources
 
-As of 2026-07-02, the architecture should not depend on Spotify's own recommendation or audio
-analysis capabilities as the core recommender intelligence.
+### MusicBrainz
 
-Key constraints:
+MusicBrainz supplies canonical artist/recording identity, search, credits, release dates, tags, and
+ISRCs. The client sends a contactable application `User-Agent`, makes at most one request per second
+across the deployment, and caches results in Supabase.
 
-- `GET /recommendations` is marked deprecated in the Spotify Web API reference.
-- Spotify audio feature endpoints are also marked deprecated.
-- Spotify states that Spotify Platform data and Spotify Content may not be used to train an AI or
-  machine-learning model.
-- User-specific endpoints require OAuth and consented scopes such as `user-top-read` and
-  `user-library-read`.
-- Spotify development mode and quota rules can constrain beta testing and public launch.
+### ListenBrainz
 
-Practical implication: use Spotify primarily for authentication, user-consented signals, catalog
-lookup, availability, playback links, and playlist creation. The recommender's model and scoring
-logic should be built on first-party app feedback, open datasets, non-Spotify feature sources, and
-transparent rules.
+ListenBrainz supplies independent collaborative discovery:
 
-## Should It Be Agent Powered?
+- Artist seeds: `GET /1/lb-radio/artist/{seed_artist_mbid}`.
+- Seed and parsed-prompt tags: `GET /1/lb-radio/tags`.
+- Recording seeds: artist radio for MusicBrainz-credited artists.
+- Recording title, artist credit, ISRC, release, and tag evidence: `POST /1/metadata/recording/`.
+- Spotify export mapping: resolve a ranked recording MBID only after ranking.
 
-Use an agent or LLM for interpretation and orchestration, not as the recommender itself.
+The client honors rate-limit headers, uses bounded retries, and stores source, fetched time,
+algorithm/version, and expiry with every cache entry. Experimental ListenBrainz Labs datasets are
+disabled in the beta path; enabling them later requires an explicit feature and coverage review.
 
-Good uses for an agent:
+### Spotify
 
-- Parse natural-language prompts into structured music intent.
-- Ask a clarification question when the prompt is too vague.
-- Choose safe tool calls such as "create playlist", "refine results", or "exclude this artist".
-- Generate short explanations from known metadata and scores.
+Spotify supplies:
 
-Avoid:
+- OAuth account identity.
+- Attributed links, embeds, and permitted display metadata.
+- Public/private playlist creation for the current user.
+- Addition of reviewed track IDs to the created playlist.
 
-- Letting the LLM directly invent song lists.
-- Training a model on Spotify content.
-- Depending on Spotify's deprecated recommendation endpoint.
-- Hiding ranking behavior behind an opaque agent loop.
+Product code does not call Spotify top, library, recently played, or playlist-read endpoints.
 
-The best split is:
+### ReccoBeats
 
-- LLM layer: understands the user's situation and translates it into constraints.
-- Recommender layer: retrieves, scores, filters, and diversifies songs.
-- Tool layer: syncs Spotify data, creates playlists, and records feedback.
+ReccoBeats remains legacy and disabled for product routes. Its own terms identify Spotify as the
+source of foundational metadata, so it is not needed for the policy-compliant beta.
 
-## Intent Model
+## Online Architecture
 
-The natural-language prompt should become a structured object before recommendation.
-
-Example prompt:
-
-> I just broke up with my girlfriend and I want songs to cheer me up.
-
-Example intent:
-
-```json
-{
-  "situation": "breakup",
-  "goal": "cheer_up",
-  "mood": {
-    "desired_valence": "high",
-    "desired_energy": "medium_high",
-    "allow_catharsis": true,
-    "avoid_too_sad": true
-  },
-  "taste": {
-    "familiarity_bias": "medium",
-    "discovery_level": "some"
-  },
-  "constraints": {
-    "explicit_allowed": null,
-    "language": null,
-    "market": "user_market"
-  }
-}
+```text
+React/Vite on Vercel
+  -> same-origin /api rewrite
+    -> API Gateway
+      -> FastAPI Lambda
+        -> Supabase Postgres
+        -> MusicBrainz API
+        -> ListenBrainz API and Labs
+        -> Spotify Accounts/Web API
+        -> KMS and Secrets Manager
+      -> SQS discovery worker
+      -> scheduled cache cleanup worker
 ```
 
-The recommender should operate on this structured intent, not on raw prompt text.
+CloudFront is not part of the design. Existing S3 and DynamoDB resources belong only to the legacy
+single-user deployment and are not queried by product routes.
 
-## Recommendation Strategy
+## Persistence
 
-Use a hybrid recommender with several candidate sources.
+Supabase contains:
 
-Candidate sources:
+- Application users, encrypted Spotify token references, and access status.
+- Hashed application sessions and one-time OAuth state.
+- Explicit user-selected seeds and blocked entities.
+- Canonical MusicBrainz entities and external identifier mappings.
+- ListenBrainz candidate edges, source facts, algorithms, fetch times, and expiries.
+- Discovery jobs and redacted external-source errors.
+- Recommendation sessions, ordered items, and evidence snapshots.
+- Feedback, reviewed selections, playlist exports, and beta evaluations.
 
-- User taste candidates from saved tracks, top tracks, top artists, playlists, and recent plays.
-- Similar catalog candidates from the repo's extracted artist and track catalog.
-- Mood candidates from ReccoBeats audio features such as valence, energy, danceability, tempo, and
-  acousticness.
-- Lyrics candidates from sentiment, language, and eventually lyric embeddings where licensing
-  allows.
-- Collaborative candidates from ListenBrainz interactions, especially for open educational training.
-- Spotify search/catalog lookups for availability and display metadata.
+The browser has no Supabase credentials. Every user-owned query requires account context from the
+server-side application session.
 
-For the beta demo, the live Spotify profile path should start with saved tracks and top items, then
-add selected user playlists or favorite playlists as candidate and taste-affinity signals. Playlist
-reads should not imply playlist writes; playlist creation remains a separate explicit action.
+## Recommendation Pipeline
 
-Ranking score:
+### 1. Resolve Intent
+
+Parse the user-authored prompt into bounded mood/tag/constraint fields. The deterministic parser is
+the default. An optional LLM receives only the raw prompt and never receives music metadata or user
+history.
+
+### 2. Resolve Seeds
+
+Resolve artist/recording text through MusicBrainz search and require explicit user confirmation.
+Store the selected MBID, display label, source, and selection time as first-party input.
+
+### 3. Retrieve Candidates
+
+Use fresh Supabase cache entries when available. Otherwise enqueue source requests:
+
+- Artist radio for each artist seed.
+- Artist radio for the credited artist of a recording seed.
+- Tag radio for prompt tags.
+
+Merge candidates by recording MBID and retain each source edge.
+
+### 4. Filter
+
+Remove selected seeds, blocked entities, duplicate recordings, disallowed explicit candidates when
+the source can establish that fact, and candidates without an export mapping or enough evidence.
+
+### 5. Rank
+
+Version `explicit-discovery-v1` uses only independent and first-party components:
 
 ```text
 score =
-  mood_fit
-  + taste_affinity
-  + collaborative_signal
-  + novelty_bonus
-  + quality_or_popularity_prior
-  + diversity_adjustment
-  - blocked_artist_penalty
-  - repetition_penalty
+  0.35 * prompt_or_tag_fit
+  + 0.30 * seed_bridge_strength
+  + 0.20 * discovery_value
+  + 0.15 * evidence_quality
 ```
 
-The first version can be rule-based and transparent. A later version can learn weights from
-first-party app feedback such as likes, skips, saves, refinements, and playlist exports.
+Familiar/balanced/adventurous shifts at most ten percentage points between bridge strength and
+discovery value. Selection enforces artist diversity and deterministic tie-breaking. Exact numeric
+scores remain internal.
 
-## Proposed Architecture
+### 6. Explain
 
-### Offline Data Layer
+Evidence cards cite:
 
-Keep the existing extraction pipeline and extend it into feature generation:
+- The user-selected seed that opened the path.
+- The ListenBrainz artist, tag, or recording-similarity edge.
+- Independent popularity/listener support when available.
+- Prompt/tag alignment.
+- A limitation when source coverage or mapping confidence is weak.
 
-- `bronze`: raw source snapshots.
-- `silver`: normalized artists, tracks, albums, lyrics, audio features, and user listens.
-- `gold`: recommender-ready tables such as track features, user-track interactions, artist affinity,
-  mood clusters, and candidate pools.
+Evidence never claims to represent the user's Spotify taste or listening history.
 
-Recommended additions:
+### 7. Review And Export
 
-- `gold/track_features`: one row per track with normalized audio, lyric, catalog, and popularity
-  features.
-- `gold/user_profiles`: app-owned user taste vectors and explicit feedback summaries.
-- `gold/candidate_sets`: precomputed nearest-neighbor or mood-based retrieval groups.
+Recommendation generation is read-only. The user reviews an ordered subset, enters the final
+playlist name and visibility, and confirms export with an idempotency key. The backend creates the
+playlist in the authenticated account and resumes partial item-add failures without creating a
+duplicate playlist.
 
-### Online Backend
+## Caching And Failure Behavior
 
-Add an API service that serves the product experience.
+- Canonical MusicBrainz entity: 30-day TTL.
+- MusicBrainz negative search: 1-hour TTL.
+- ListenBrainz candidate and metadata expansion: 7-day positive TTL and 1-hour negative TTL.
+- Normalized ListenBrainz recording entity: 30-day TTL.
+- Spotify export mapping: 24-hour maximum TTL.
 
-Suggested modules:
+Expired cache is never treated as fresh silently. A source outage returns queued, degraded, or
+source-unavailable state. HTTP retries are followed by at most three SQS worker attempts. The
+product never falls back to a repository file or S3.
 
-- `auth`: Spotify OAuth and token refresh.
-- `profiles`: sync and normalize user taste signals from saved tracks, top items, selected
-  playlists, and optional recently played tracks.
-- `intent`: LLM-backed prompt-to-intent parser with schema validation.
-- `retrieval`: candidate generation from catalog, features, and user profile.
-- `ranking`: scoring, filtering, and diversification.
-- `feedback`: app-specific events and preference updates.
-- `playlists`: Spotify playlist creation and update tools.
+## Scientific Evaluation
 
-FastAPI is a practical fit for the current Python repo, but the key decision is keeping the
-recommendation logic in ordinary Python modules that can be tested without the web server.
+The first beta freezes ranking and source versions. Each tester completes three sessions: familiar,
+mood/activity, and adventurous. The primary measure is whether the tester rates the session better
+than their usual Spotify discovery experience. Secondary measures are selected-track rate,
+playlist export, explanation usefulness, source coverage, latency, and evidence complaints.
 
-### Storage
-
-Use different storage for different latency needs:
-
-- S3 or local Parquet for offline snapshots and experiments.
-- Postgres for app users, OAuth token metadata, feedback, and recommendation sessions.
-- pgvector or Qdrant for vector retrieval if embeddings are added.
-- Redis only if caching or background job coordination becomes necessary.
-
-### Background Jobs
-
-Use background jobs for:
-
-- Spotify profile sync.
-- Catalog refresh.
-- Feature generation.
-- Candidate precomputation.
-- Feedback aggregation.
-
-The API request path should stay fast: parse intent, load profile, retrieve candidates, rank,
-return results.
-
-## User Experience Ideas
-
-Core first screen:
-
-- A single natural-language input.
-- Spotify connect status.
-- A result list with album art, song, artist, reason, and quick actions.
-- Refinement chips such as "more upbeat", "less sad", "more familiar", "more discovery",
-  "Spanish only", "no explicit", and "save playlist".
-
-Recommendation response should show:
-
-- Track title and artist.
-- Spotify link or playable embed.
-- Why it was chosen.
-- Confidence or fit tags such as "upbeat", "familiar", "new discovery", or "cathartic".
-
-The best UX pattern is iterative:
-
-1. User gives an emotional request.
-2. App returns a coherent set.
-3. User adjusts with natural language or controls.
-4. App records feedback and improves the next set.
-
-## MVP Roadmap
-
-1. Define `MoodIntent` and `RecommendationRequest` schemas.
-2. Build a local recommender that reads existing Parquet data and returns ranked tracks for a prompt.
-3. Add deterministic rule-based scoring for mood fit and user taste.
-4. Add an LLM intent parser with strict JSON schema validation and fallback defaults.
-5. Add Spotify OAuth and user profile sync.
-6. Add feedback events: like, dislike, hide artist, save, skip, and refine.
-7. Add playlist creation once recommendations are useful.
-8. Add vector retrieval and learned ranking only after enough first-party feedback exists.
-
-## Open Decisions
-
-- Is this a personal/demo app, a class project, a private beta, or a public product?
-- Should the MVP require Spotify login from day one, or support manual seed artists/tracks first?
-- Is the main success criterion mood accuracy, music discovery, or "sounds like my taste"?
-- How much explanation should the UI show without making the product feel analytical?
-- What policy review is needed before storing or deriving features from Spotify user data?
-
-## Recommendation
-
-Start with a hybrid, transparent recommender:
-
-- Use an LLM only to parse intent and generate grounded explanations.
-- Use rules and feature scoring for the first ranking engine.
-- Use ReccoBeats, lyrics NLP, ListenBrainz, and first-party app feedback as the recommender
-  intelligence.
-- Use Spotify for user consent, user signals, catalog lookup, playback links, and playlist creation.
-
-This path fits the existing repo and avoids relying on deprecated Spotify recommendation/audio
-feature endpoints.
+Five users provide directional product evidence only. Report counts, medians, and per-user ranges,
+not statistical significance.
 
 ## Sources
 
-- [Spotify Web API: Get Recommendations](https://developer.spotify.com/documentation/web-api/reference/get-recommendations)
-- [Spotify Web API: Get Track's Audio Features](https://developer.spotify.com/documentation/web-api/reference/get-audio-features)
-- [Spotify Web API: Get User's Top Items](https://developer.spotify.com/documentation/web-api/reference/get-users-top-artists-and-tracks)
-- [Spotify Web API: Get User's Saved Tracks](https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks)
-- [Spotify Web API: Authorization](https://developer.spotify.com/documentation/web-api/concepts/authorization)
-- [Spotify Web API: Quota Modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)
 - [Spotify Developer Policy](https://developer.spotify.com/policy)
+- [MusicBrainz Web Service](https://musicbrainz.org/doc/Development/XML_Web_Service/Version_2)
+- [MusicBrainz search](https://musicbrainz.org/doc/MusicBrainz_API/Search)
+- [MusicBrainz rate limiting](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)
+- [ListenBrainz API](https://listenbrainz.readthedocs.io/en/latest/users/api/index.html)
+- [ListenBrainz core endpoints](https://listenbrainz.readthedocs.io/en/latest/users/api/core.html)
+- [ListenBrainz Labs dataset hoster](https://labs.api.listenbrainz.org/)
+- [ReccoBeats terms](https://reccobeats.com/docs/documentation/terms-of-service)

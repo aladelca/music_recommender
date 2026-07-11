@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Any
-
-from agents import Agent, Runner
+from typing import Any, Literal
 
 from music_recommender.models import JsonDict
 from music_recommender.recommender.models import MoodIntent
@@ -65,9 +63,73 @@ class ParsedMoodIntent:
 
 
 IntentParser = Callable[[str], ParsedMoodIntent]
+AdventureMode = Literal["familiar", "balanced", "adventurous"]
 
 
-def build_intent_agent(*, model: str | None = None) -> Agent[Any]:
+class DiscoveryIntentValidationError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class DiscoveryIntent:
+    label: str
+    tags: tuple[str, ...]
+    adventure: AdventureMode
+    allow_explicit: bool
+    parser_version: str
+
+    def to_dict(self) -> JsonDict:
+        return {
+            "label": self.label,
+            "tags": list(self.tags),
+            "adventure": self.adventure,
+            "allow_explicit": self.allow_explicit,
+            "parser_version": self.parser_version,
+        }
+
+
+PromptOnlyIntentParser = Callable[[str], dict[str, Any]]
+
+
+class PolicySafeIntentParser:
+    def __init__(
+        self,
+        *,
+        llm_parser: PromptOnlyIntentParser | None = None,
+        parser_version: str = "deterministic-intent-v1",
+    ) -> None:
+        normalized_version = parser_version.strip()
+        if not normalized_version or len(normalized_version) > 100:
+            raise ValueError("Intent parser version is invalid.")
+        self.llm_parser = llm_parser
+        self.parser_version = normalized_version
+
+    def parse(
+        self,
+        prompt: str,
+        *,
+        adventure: AdventureMode,
+        allow_explicit: bool,
+    ) -> DiscoveryIntent:
+        normalized_prompt = _product_prompt(prompt)
+        if adventure not in {"familiar", "balanced", "adventurous"}:
+            raise DiscoveryIntentValidationError("Adventure mode is invalid.")
+        if self.llm_parser is None:
+            label, tags = _deterministic_discovery_fields(normalized_prompt)
+        else:
+            label, tags = _validated_prompt_only_output(self.llm_parser(normalized_prompt))
+        return DiscoveryIntent(
+            label=label,
+            tags=tags,
+            adventure=adventure,
+            allow_explicit=allow_explicit,
+            parser_version=self.parser_version,
+        )
+
+
+def build_intent_agent(*, model: str | None = None) -> Any:
+    from agents import Agent
+
     return Agent(
         name="Music intent parser",
         model=model or DEFAULT_INTENT_MODEL,
@@ -83,8 +145,12 @@ def parse_intent_with_agent(
     prompt: str,
     *,
     model: str | None = None,
-    runner: Any = Runner,
+    runner: Any | None = None,
 ) -> ParsedMoodIntent:
+    if runner is None:
+        from agents import Runner
+
+        runner = Runner
     result = runner.run_sync(build_intent_agent(model=model), prompt, max_turns=3)
     output = result.final_output
     if isinstance(output, ParsedMoodIntent):
@@ -133,6 +199,98 @@ def parse_intent_deterministically(prompt: str) -> ParsedMoodIntent:
         blocked_artist_names=blocked_artists,
         rationale="Used balanced default intent.",
     )
+
+
+def _deterministic_discovery_fields(prompt: str) -> tuple[str, tuple[str, ...]]:
+    normalized = prompt.casefold()
+    categories: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+        (
+            "high-energy",
+            ("party", "dance", "workout", "running", "hype", "energetic"),
+            ("dance", "electronic", "house"),
+        ),
+        (
+            "calm-focus",
+            ("calm", "focus", "study", "relax", "reading", "quiet"),
+            ("ambient", "downtempo", "instrumental"),
+        ),
+        (
+            "uplifting",
+            ("break up", "breakup", "broke up", "cheer", "uplifting", "happy"),
+            ("indie pop", "soul", "dance pop"),
+        ),
+        (
+            "reflective",
+            ("sad", "melancholy", "reflective", "rainy", "heartbreak"),
+            ("dream pop", "slowcore", "indie rock"),
+        ),
+    )
+    for label, terms, tags in categories:
+        if any(term in normalized for term in terms):
+            return label, tags
+    genre_tags = tuple(
+        genre
+        for genre in (
+            "ambient",
+            "classical",
+            "country",
+            "electronic",
+            "folk",
+            "hip hop",
+            "house",
+            "indie rock",
+            "jazz",
+            "metal",
+            "pop",
+            "punk",
+            "reggae",
+            "r&b",
+            "soul",
+            "techno",
+        )
+        if genre in normalized
+    )[:3]
+    return ("genre-guided", genre_tags) if genre_tags else ("seed-led", ())
+
+
+def _validated_prompt_only_output(payload: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    if not isinstance(payload, dict) or set(payload) != {"label", "tags"}:
+        raise DiscoveryIntentValidationError(
+            "Prompt parser output must contain only label and tags."
+        )
+    label_value = payload.get("label")
+    tags_value = payload.get("tags")
+    if not isinstance(label_value, str) or not isinstance(tags_value, list):
+        raise DiscoveryIntentValidationError("Prompt parser output is invalid.")
+    label = label_value.strip().casefold().replace(" ", "-")
+    if (
+        not 1 <= len(label) <= 50
+        or not label.replace("-", "").isalnum()
+        or label.startswith("-")
+        or label.endswith("-")
+    ):
+        raise DiscoveryIntentValidationError("Prompt parser label is invalid.")
+    tags: list[str] = []
+    for value in tags_value:
+        if not isinstance(value, str):
+            raise DiscoveryIntentValidationError("Prompt parser tags are invalid.")
+        tag = " ".join(value.split())
+        if not 1 <= len(tag) <= 64:
+            raise DiscoveryIntentValidationError("Prompt parser tags are invalid.")
+        if tag.casefold() not in {existing.casefold() for existing in tags}:
+            tags.append(tag)
+        if len(tags) > 3:
+            raise DiscoveryIntentValidationError("Prompt parser returned too many tags.")
+    return label, tuple(tags)
+
+
+def _product_prompt(value: str) -> str:
+    normalized = " ".join(value.split())
+    if not 2 <= len(normalized) <= 500 or any(ord(character) < 32 for character in normalized):
+        raise DiscoveryIntentValidationError(
+            "Discovery prompt must contain between 2 and 500 plain-text characters."
+        )
+    return normalized
 
 
 def _intent_from_mapping(payload: dict[str, Any]) -> ParsedMoodIntent:

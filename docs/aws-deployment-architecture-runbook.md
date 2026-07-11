@@ -1,218 +1,183 @@
-# AWS Deployment Architecture Runbook
+# Product Deployment Architecture Runbook
 
-This document describes the architecture implemented by `infra/template.yaml` and deployed as
-CloudFormation stack `music-recommender-demo` in AWS account `571600852509`, region `us-east-1`.
-It supersedes the proposed online architecture in `recommender-architecture.md` for operational
-decisions.
-
-Current API URL: `https://4bds6ddj39.execute-api.us-east-1.amazonaws.com/`.
+This runbook describes the Outside the Loop five-user product. The authoritative infrastructure is
+`infra/template.yaml`; the browser deployment is configured by `web/vercel.mjs`; the relational
+schema is in `supabase/migrations/`.
 
 ## Product Boundary
 
-The deployment is a backend-only, single-Spotify-user product. It includes authenticated API
-access, live profile refresh, catalog ranking, feedback capture, and private/public playlist
-creation. It does not include a frontend, custom domain, Cognito, per-customer Spotify OAuth, or
-tenant isolation.
+The product is a multi-user, session-authenticated discovery application. Users explicitly choose
+MusicBrainz seeds. ListenBrainz supplies independent discovery candidates. Supabase Postgres stores
+normalized product records and expiring API caches. Spotify supplies identity, attributed display
+and links after ranking, and explicit playlist writes.
 
-## Component Topology
+There are no local or S3 product dataset reads and no runtime CSV or Parquet input. Product
+functions have no S3 environment variables or S3 IAM permissions. The old single-user S3/DynamoDB
+demo is a separate compatibility stack condition and remains absent when
+`DeployLegacyDemo=false`.
+
+## Topology
 
 ```mermaid
 flowchart LR
-    Client[API client] -->|HTTPS + X-API-Key| APIGW[API Gateway HTTP API]
-    APIGW --> API[FastAPI API Lambda]
+    User[Tester browser] -->|HTTPS| Vercel[Vercel React/Vite]
+    Vercel -->|same-origin /api rewrite| APIGW[API Gateway HTTP API]
+    APIGW --> API[Product FastAPI Lambda]
 
-    API -->|read catalog and interactions| S3[(S3 data bucket)]
-    API -->|profile, sessions, feedback, idempotency| DDB[(DynamoDB)]
-    API -->|refresh token exchange and user APIs| Spotify[Spotify Web API]
-    API -->|optional intent and orchestration| OpenAI[OpenAI API]
+    API --> DB[(Supabase Postgres)]
+    API --> MB[MusicBrainz HTTPS API]
+    API --> Spotify[Spotify OAuth/Web API]
+    API --> KMS[AWS KMS]
+    API --> Queue[SQS FIFO discovery queue]
 
-    Schedule[EventBridge daily schedule] --> Sync[Profile Sync Lambda]
-    Sync --> Spotify
-    Sync -->|replace cached profile| DDB
+    Queue --> Worker[Discovery Lambda]
+    Worker --> LB[ListenBrainz Core HTTPS API]
+    Worker --> DB
+    Queue --> DLQ[SQS FIFO dead-letter queue]
 
-    Secrets[Secrets Manager runtime secret] -. deploy-time dynamic references .-> API
-    Secrets -. deploy-time dynamic references .-> Sync
-    APIGW --> AccessLogs[CloudWatch API access logs]
-    API --> ApiLogs[CloudWatch Lambda logs]
-    Sync --> SyncLogs[CloudWatch Lambda logs]
-    API --> ApiAlarm[CloudWatch error alarm]
-    Sync --> SyncAlarm[CloudWatch error alarm]
+    Schedule[EventBridge daily schedule] --> Cleanup[Cleanup Lambda]
+    Cleanup --> DB
+
+    API --> Logs[CloudWatch logs and EMF metrics]
+    Worker --> Logs
+    Cleanup --> Logs
+    Logs --> Alarms[CloudWatch alarms]
+    Alarms --> SNS[SNS operator email]
 ```
 
-## Deployed Resources
+There is no CloudFront distribution. Vercel is already the frontend edge and API Gateway is the
+backend edge, so adding CloudFront would duplicate caching, TLS, routing, and incident surfaces
+without helping this beta.
 
-| Resource | Configuration | Responsibility |
+## Trust Boundaries
+
+| Boundary | Data allowed | Data prohibited |
 | --- | --- | --- |
-| API Gateway HTTP API | `$default` stage | Routes all root and proxy requests to FastAPI |
-| API Lambda | Python 3.12, x86_64, 1024 MB, 30 seconds | API key enforcement, profile calls, ranking, feedback, playlists |
-| Profile sync Lambda | Python 3.12, x86_64, 512 MB, 90 seconds | Scheduled Spotify profile refresh |
-| EventBridge rule | `cron(0 10 * * ? *)` by default | Invokes profile sync daily at 10:00 UTC |
-| Users DynamoDB table | Partition key `user_id` | Cached Spotify profile snapshot |
-| Sessions DynamoDB table | Partition key `session_id` | Recommendation inputs, outputs, and playlist result |
-| Feedback DynamoDB table | Partition key `session_id`, sort key `event_key` | Append-style feedback events |
-| Playlists DynamoDB table | Partition key `session_id` | Spotify playlist idempotency record |
-| S3 data bucket | `music-recommender-571600852509-us-east-1` | Versioned catalog and offline interaction runs |
-| Secrets Manager | `music-recommender/demo/runtime` | API key, Spotify OAuth values, OpenAI API key |
-| CloudWatch logs | 14-day retention | HTTP access and Lambda execution logs |
-| CloudWatch alarms | Error count greater than zero over 5 minutes | API and scheduled Lambda failure signals |
+| Browser/Vercel | Opaque session/CSRF cookies, public API JSON, Spotify attribution | Supabase DSN, Spotify client secret or refresh token, KMS data |
+| API Lambda | Account-scoped product records, decrypted token in memory, normalized requests | Caller-selected account IDs, local/S3 catalog inputs |
+| Discovery Lambda | Internal account/job IDs, explicit seed MBIDs, normalized source facts | Spotify tokens, profile/listening records, request prompts |
+| Supabase | Product source of truth and bounded caches | Browser credentials or public `anon` access |
+| Logs/metrics | Request ID, route template, latency, status, HMAC correlation, counts | Prompt/body, cookies, auth headers, raw account ID, token, raw provider response, comment |
 
-All four DynamoDB tables use on-demand billing, server-side encryption, point-in-time recovery, and
-CloudFormation retain policies for deletion and replacement.
+The Supabase browser roles have all table and function access revoked. AWS connects through the
+TLS transaction pooler as `outside_loop_runtime`, a backend-only role with product DML and
+read-only migration metadata but no DDL or role/database administration. It can bypass RLS so
+OAuth, cleanup, and source-cache system transactions work; ownership is enforced by account-scoped
+repositories, foreign keys, constraints, and transactions. Prepared statements are disabled for
+Supavisor transaction mode.
 
-## API Request Flow
+## Request And Authentication Flow
 
-1. API Gateway sends the request to the FastAPI Lambda through the root or proxy route.
-2. FastAPI allows `/health`, `/docs`, `/redoc`, and `/openapi.json` without a key. Other paths are
-   compared against `RECOMMENDER_API_KEY` using a constant-time comparison.
-3. The API Lambda loads deployment settings from environment variables.
-4. Recommendation calls read the selected catalog and interaction run from S3, then merge unique
-   tracks captured in the cached Spotify profile.
-5. The ranker uses the cached profile in DynamoDB, plus any request-level profile additions.
-6. Requests with `use_openai_agent: true` call OpenAI for intent parsing and orchestration. The
-   deterministic ranking tool and track-ID guardrail remain authoritative.
-7. The complete recommendation response is stored in the sessions table before any playlist side
-   effect.
-8. When `create_playlist` is true, the API exchanges the Spotify refresh token, creates the playlist,
-   stores its result by session ID, and returns it as `playlist_result`.
-9. Feedback and explicit playlist requests validate their session and track IDs against the stored
-   recommendation. Replaying `POST /playlists` for that session returns the existing result.
+1. The frontend redirects to `/api/auth/spotify/start`.
+2. AWS stores a one-time hashed OAuth state and a KMS-encrypted PKCE verifier in Postgres.
+3. Spotify redirects to the exact Vercel `/api/auth/spotify/callback` URI.
+4. AWS exchanges the code, reads only Spotify account identity, encrypts the refresh token with an
+   account-bound KMS context, and issues opaque application/CSRF cookies.
+5. A new account is `pending`. An operator may approve up to five accounts atomically.
+6. Every protected route derives ownership from the active session. Mutations additionally require
+   the exact Vercel Origin and double-submit CSRF token.
 
-## Profile Refresh Flow
+Sessions expire after seven idle days and 30 absolute days. Logout/revocation invalidates server
+state; account deletion cascades all account-owned rows.
 
-Manual `POST /profile/sync` and the EventBridge-triggered Lambda use the same profile service:
+## Discovery And Recommendation Flow
 
-1. Exchange the configured refresh token for a short-lived Spotify access token.
-2. Verify the authenticated Spotify account matches `SPOTIFY_DEMO_USER_ID`.
-3. Read configured saved, top, playlist, and optional recent-play signals.
-4. Normalize and deduplicate track and artist signals.
-5. Store one current profile snapshot under the configured user ID in the users table.
+1. An approved user searches MusicBrainz and explicitly confirms one to five artist/recording
+   MBIDs. MusicBrainz calls use a distributed one-request-per-second slot and positive/negative
+   Postgres caching.
+2. `POST /discovery/jobs` writes an idempotent discovery job and sends a FIFO SQS message.
+3. The worker claims the account-owned job, calls ListenBrainz artist/tag radio and recording
+   metadata with bounded retries, and writes normalized entities/candidate edges with provenance and
+   expiry.
+4. Recommendation generation reads only fresh Supabase entities/edges plus the user's explicit
+   blocks. `explicit-discovery-v1` ranks deterministically.
+5. Evidence is generated from selected seeds, ListenBrainz source edges, tags, listener counts, and
+   source diversity. Unsupported claims fail validation.
+6. Only ranked records are resolved to Spotify IDs, first by exact ISRC and then exact normalized
+   title/artist. Spotify popularity/profile data never enters the score.
+7. The API stores a complete account-owned snapshot before returning it. The user reviews order,
+   name, and visibility in a separate mutation.
+8. An idempotent explicit export decrypts the current account's refresh token in memory, calls
+   Spotify `/me/playlists`, writes items, and persists completion/partial failure.
 
-Optional playlist or recently-played scope failures are recorded in the snapshot. A mismatched
-Spotify account is a hard failure so one user's data cannot silently populate another configured
-profile.
+A source outage yields queued, degraded, insufficient, or failed states. It never triggers a
+fallback to repository files, S3, Spotify profile analysis, or invented recommendations.
 
-## Data And Artifact Boundary
+## AWS Resources
 
-Catalog and interaction datasets remain in S3. They are selected by the `CatalogRunId` and
-`InteractionRunId` CloudFormation parameters and read by the API Lambda at request time.
+| Resource | Key configuration | Purpose |
+| --- | --- | --- |
+| `OutsideTheLoopHttpApi` | `$default`, rate 10/s, burst 20, no sensitive access-log fields | Product HTTP edge |
+| `OutsideTheLoopApiFunction` | Python 3.12, 768 MiB, 29 s, reserved concurrency 5, X-Ray | OAuth and product API |
+| `OutsideTheLoopDiscoveryQueue` | FIFO, AWS-managed SQS KMS, visibility 180 s, max receives 3 | Ordered/idempotent expansion |
+| `OutsideTheLoopDiscoveryWorkerFunction` | 512 MiB, 120 s, reserved concurrency 2, partial batch response | ListenBrainz expansion/cache |
+| `OutsideTheLoopDiscoveryDlq` | FIFO, 14-day retention | Poison-message isolation |
+| `OutsideTheLoopCleanupFunction` | 256 MiB, 60 s, daily schedule | Bounded retention cleanup |
+| `OutsideTheLoopTokenKey` | Customer-managed, rotation enabled, retained | Token and PKCE encryption |
+| Log groups | 30-day retention | API, worker, cleanup, access logs |
+| EMF/alarms/SNS | API/source/database/reconnect/latency/queue/DLQ metrics | Operator detection and email |
 
-Lambda artifacts contain application code and function dependencies only. The build and pruning
-scripts reject any `.parquet` or `.csv` file in either function artifact, check the Lambda unzipped
-size limit, and leave data files outside CloudFormation/SAM uploads. Deploying the application does
-not copy Parquet or CSV datasets into Lambda packages.
+The product API role can encrypt/decrypt only with its token key and send only to its discovery
+queue. SAM grants the worker the queue-consume permissions generated by its event mapping. Product
+roles do not read Secrets Manager at runtime because CloudFormation resolves scoped dynamic
+references during deployment; the deployment role can read and rotate only that named secret.
 
-The data path and the runtime-state path are intentionally separate:
+## Persistence
 
-- S3 contains immutable/versioned offline runs.
-- DynamoDB contains mutable profile, session, feedback, and playlist state.
-- Secrets Manager contains credentials, not datasets.
-- Lambda temporary storage is not a system of record.
+Supabase Postgres is the single product database. It stores users/encrypted token ciphertext,
+OAuth state, sessions, explicit seeds, normalized entities/caches/rate slots, jobs/edges, Spotify ID
+mappings, recommendations/evidence, preferences, feedback, exports, and evaluations.
+
+Important integrity rules include:
+
+- At most five approved non-deleted accounts.
+- At most five active seeds per account.
+- One-time atomic OAuth-state consumption.
+- Hash-only application session and CSRF values.
+- Composite session/account foreign keys for feedback and exports.
+- Idempotency uniqueness scoped to the owning account/session.
+- Revoked access removes refresh-token ciphertext and active sessions.
+
+Positive source caches generally live seven days, negative cache entries one hour, normalized
+entities up to 30 days, and Spotify mappings 24 hours. Scheduled cleanup removes expired/bounded
+records; account deletion removes all account-owned records immediately.
 
 ## Configuration And Secret Flow
 
-SAM passes bucket, run IDs, table names, mode flags, user ID, and optional OpenAI model into Lambda
-environment variables. Secret values use CloudFormation Secrets Manager dynamic references and are
-resolved into the Lambda environment during deployment.
+The product runtime secret contains only:
 
-Consequences:
+```text
+SPOTIFY_APP_CLIENT_ID
+SPOTIFY_APP_CLIENT_SECRET
+SUPABASE_DB_URL
+OBSERVABILITY_HASH_KEY
+```
 
-- A Secrets Manager version update alone does not refresh an already deployed Lambda environment.
-- After credential or API-key rotation, redeploy the stack and run the smoke suite.
-- Never inspect the full Lambda environment or secret value in logs or terminal output.
-- The health route reports whether settings are present, not their values.
+SAM supplies non-secret values such as `APP_BASE_URL`, `AUTH_ALLOWED_ORIGINS`, contact email,
+market, queue URL, and KMS ARN. A secret version change requires a stack update so CloudFormation
+re-resolves dynamic references. The observability key HMACs internal account correlation; raw
+Spotify account IDs are not emitted.
 
-## IAM Boundaries
+## Packaging Boundary
 
-The API Lambda can read/list only the configured S3 bucket and prefix. It can read and update the
-four stack tables and read secrets under `music-recommender/demo/`. The scheduled Lambda can only
-read/write the users table; it has no session, feedback, playlist, or S3 permissions.
+The deployment builds separate thin contexts for product API, worker, and cleanup. Product locks do
+not include PyArrow, OpenAI, Pandas, or NumPy. Preparation and pruning fail if `.parquet`, `.csv`, or
+`.env` occurs anywhere in an artifact, and each product package must stay below 128 MiB unzipped.
 
-CloudFormation creates the Lambda execution roles through SAM. The currently configured AWS CLI
-identity is the account root identity; routine deployment should move to IAM Identity Center or a
-scoped deployment role, followed by revocation of root access keys.
+The legacy API and scheduler have separate contexts and resources under the `DeployLegacy`
+condition. Even if their code is packaged by SAM, it is not configured or created in the product
+stack when `DeployLegacyDemo=false`.
 
 ## Reliability And Recovery
 
-- DynamoDB point-in-time recovery protects runtime state from accidental writes; restoration creates
-  a new table that must then be wired into the stack.
-- DynamoDB retain policies prevent stack deletion from deleting product state automatically.
-- Recommendation sessions make feedback validation and playlist retries deterministic.
-- Playlist creation is idempotent per recommendation session.
-- CloudFormation rollback restores the previous stack configuration after a failed deployment.
-- API and Lambda logs retain 14 days, which bounds incident lookback.
-- Lambda error alarms exist, but no SNS notification endpoint is configured. They are not unattended
-  paging until a subscription is added.
+- FIFO deduplication, job claims, and playlist idempotency make retries bounded.
+- Partial SQS batch responses retry only failed records; three failed receives move to the DLQ.
+- Postgres writes that span multiple records run in transactions.
+- `/health` is shallow; `/ready` verifies database connectivity without exposing settings.
+- Lambda/SQS and custom EMF alarms notify the SNS operator subscription after email confirmation.
+- CloudFormation rollback restores the previous application configuration; KMS is retained.
+- Supabase backups/PITR are the database recovery boundary. Do not dual-write to DynamoDB.
 
-The API Lambda is synchronous and has a 30-second timeout. A cold start, S3 reads, OpenAI, and
-Spotify calls share that budget. The scheduled profile path has 90 seconds because it reads more
-Spotify pages.
-
-## Inspect The Live Architecture
-
-Confirm stack state and outputs:
-
-```bash
-aws cloudformation describe-stacks \
-  --region us-east-1 \
-  --stack-name music-recommender-demo \
-  --query 'Stacks[0].{Status:StackStatus,Parameters:Parameters,Outputs:Outputs}' \
-  --output json | jq .
-```
-
-List physical resources without reading data or secrets:
-
-```bash
-aws cloudformation describe-stack-resources \
-  --region us-east-1 \
-  --stack-name music-recommender-demo \
-  --query 'StackResources[].{Logical:LogicalResourceId,Physical:PhysicalResourceId,Type:ResourceType,Status:ResourceStatus}' \
-  --output table
-```
-
-Confirm table recovery configuration:
-
-```bash
-for table in $(aws cloudformation describe-stacks \
-  --region us-east-1 \
-  --stack-name music-recommender-demo \
-  --query 'Stacks[0].Outputs[?contains(OutputKey, `TableName`)].OutputValue' \
-  --output text); do
-  aws dynamodb describe-continuous-backups \
-    --region us-east-1 \
-    --table-name "$table" \
-    --query 'ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus' \
-    --output text
-done
-```
-
-## Deploy And Validate
-
-Use the deployment wrapper so readiness, SAM validation, artifact pruning, and package-size checks
-run before CloudFormation:
-
-```bash
-STACK_NAME=music-recommender-demo \
-AWS_REGION_VALUE=us-east-1 \
-DATA_BUCKET_NAME=music-recommender-571600852509-us-east-1 \
-CATALOG_RUN_ID=20260522052343-7123c483 \
-INTERACTION_RUN_ID=profile-20260709-live-smoke \
-bash scripts/deploy_api_sam.sh
-
-STACK_NAME=music-recommender-demo \
-AWS_REGION_VALUE=us-east-1 \
-bash scripts/smoke_test_deployed_api.sh
-```
-
-The smoke suite performs a real profile sync and creates one public Spotify playlist, then verifies
-idempotent replay. Use [operational-aws-runbook.md](operational-aws-runbook.md) for secret rotation,
-monitoring, rollback, and incident procedures. Use
-[api-usage-runbook.md](api-usage-runbook.md) for individual API calls.
-
-## Known Production Gaps
-
-- Authentication is one shared API key, not user identity or authorization.
-- One Spotify refresh token and user ID serve the entire deployment.
-- There is no web application, custom domain, WAF, rate-limit policy, or tenant boundary.
-- Alarm state is visible in CloudWatch but has no notification subscriber.
-- Feedback is stored but does not yet update ranking behavior.
-- Root AWS CLI credentials must be replaced by a scoped operational identity.
+Operational commands, migration safety, incident response, and rollback are in
+[operational-aws-runbook.md](operational-aws-runbook.md). Frontend routing is in
+[vercel-deployment-runbook.md](vercel-deployment-runbook.md).

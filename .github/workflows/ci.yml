@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups --frozen
+      - run: uv run ruff format --check src tests scripts/audit_beta_sources.py
+      - run: uv run ruff check src tests scripts/audit_beta_sources.py
+      - run: uv run mypy src tests scripts/audit_beta_sources.py
+      - run: uv run pytest -q
+
+  supabase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - uses: supabase/setup-cli@v2
+        with:
+          version: 2.84.2
+          github-token: ${{ github.token }}
+      - run: uv sync --all-groups --frozen
+      - run: supabase start
+      - run: supabase db reset
+      - run: supabase db lint --local --level warning
+      - run: supabase test db
+      - run: uv run pytest tests/integration -q
+        env:
+          TEST_SUPABASE_DB_URL: postgresql://postgres:postgres@127.0.0.1:55432/postgres
+      - if: always()
+        run: supabase stop --no-backup
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test -- --run
+      - run: npm run build
+      - name: Reject privileged frontend values
+        run: |
+          if grep -ERiq 'SUPABASE_DB_URL|SPOTIFY_APP_CLIENT_SECRET|postgres(ql)?://' dist; then
+            exit 1
+          fi
+
+  browser:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+  sam:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: aws-actions/setup-sam@v2
+      - run: bash scripts/prepare_lambda_build.sh
+      - run: sam validate --lint --template-file infra/template.yaml
+      - run: sam build --template-file infra/template.yaml
+      - run: bash scripts/prune_lambda_artifacts.sh
+      - name: Reject product data and secret files
+        run: |
+          forbidden="$(find .aws-sam/build -type f \( -iname '*.parquet' -o -iname '*.csv' -o -name '.env' \) -print -quit)"
+          test -z "$forbidden"
+      - name: Check product package sizes
+        run: |
+          for function in OutsideTheLoopApiFunction OutsideTheLoopDiscoveryWorkerFunction OutsideTheLoopCleanupFunction; do
+            size="$(du -sk ".aws-sam/build/$function" | awk '{print $1}')"
+            test "$size" -lt 131072
+          done
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

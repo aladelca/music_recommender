@@ -1,192 +1,317 @@
-# Operational AWS Runbook
+# Product Operations Runbook
 
-This runbook operates the secured single-user music recommender backend in AWS account
-`571600852509`, region `us-east-1`. It does not deploy a frontend, custom domain, or multi-user OAuth
-flow.
+This runbook provisions and operates the Outside the Loop beta on Supabase, AWS, and Vercel. The
+default AWS stack is `outside-the-loop-beta`. Product deployments must keep
+`DEPLOY_LEGACY_DEMO=false`; no S3 dataset is required or permitted.
 
-Current deployed stack: `music-recommender-demo`. Current API URL:
-`https://4bds6ddj39.execute-api.us-east-1.amazonaws.com/`.
+## Required Access And Tools
 
-## Architecture
+- Supabase project-owner access and Supabase CLI.
+- AWS CLI access through IAM Identity Center or a scoped deployment role, plus AWS SAM CLI.
+- Vercel project access and Spotify developer-dashboard access.
+- `uv`, `jq`, `curl`, Node/npm, Docker, and OpenSSL.
+- A contact email that can identify the application to MusicBrainz/ListenBrainz and receive SNS
+  alarm confirmations.
 
-- API Gateway HTTP API exposes FastAPI from Lambda.
-- `X-API-Key` protects profile, recommendation, feedback, and playlist routes.
-- S3 stores validated catalog and offline Spotify profile datasets.
-- DynamoDB stores the live profile cache, recommendation sessions, feedback, and playlist
-  idempotency records.
-- Secrets Manager stores OpenAI, Spotify, and API credentials.
-- EventBridge invokes a dedicated profile-sync Lambda daily at 10:00 UTC by default.
-- CloudWatch retains API access and Lambda logs for 14 days and alarms on Lambda errors.
+Do not deploy with AWS root access keys. CI uses GitHub OIDC and `AWS_DEPLOY_ROLE_ARN`; local
+operators should use a short-lived AWS profile.
 
-Lambda build contexts contain only application source and function-specific Python dependencies.
-The build fails if a Parquet or CSV file enters either artifact; catalog/profile data remains in S3.
+## 1. Local Release Gate
 
-## Security Preconditions
-
-Do not print or commit `.env`, OAuth responses, API keys, or Secrets Manager values. The currently
-configured AWS CLI identity is the account root identity; move routine future deployments to IAM
-Identity Center or a scoped deployment role and revoke root access keys after that migration.
-
-The data bucket must keep S3 Block Public Access enabled. Protected API calls must return `401`
-without `X-API-Key`; the smoke script verifies this after every deployment.
-
-## Initial Deployment
-
-Install the supported SAM CLI package and verify the local toolchain:
+Run this before touching production:
 
 ```bash
-brew install aws-sam-cli
-aws sts get-caller-identity
-sam --version
+uv sync --all-groups --frozen
+supabase start
+supabase db reset
+supabase db lint --local --level warning
+supabase test db
+TEST_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres \
+  uv run pytest tests/integration -q
+uv run ruff format --check src tests scripts/audit_beta_sources.py
+uv run ruff check src tests scripts/audit_beta_sources.py
+uv run mypy src tests scripts/audit_beta_sources.py
+uv run pytest -q
+
+npm --prefix web ci
+npm --prefix web audit --audit-level=high
+npm --prefix web run lint
+npm --prefix web run typecheck
+npm --prefix web run test -- --run
+npm --prefix web run build
+npm --prefix web run test:e2e
+
+bash scripts/prepare_lambda_build.sh
+sam validate --lint --template-file infra/template.yaml
+sam build --template-file infra/template.yaml
+bash scripts/prune_lambda_artifacts.sh
 ```
 
-Validate the Spotify refresh token and required scopes without printing it:
+Inspect `.aws-sam/build/OutsideTheLoop*`: no `.env`, `.csv`, `.parquet`, local catalog, or S3 data
+reader configuration may be present.
+
+## 2. Provision And Migrate Supabase
+
+Create a production Supabase project in the chosen region. Enable the backup/PITR option available
+for the project plan before inviting testers. Record the project ref in a private operator
+environment, then link without committing generated credentials:
 
 ```bash
-uv run music-recommender-demo-readiness refresh-spotify-token
-uv run music-recommender-demo-readiness check-live-profile --include-playlists
+export SUPABASE_PROJECT_REF='<project-ref>'
+supabase link --project-ref "$SUPABASE_PROJECT_REF"
+supabase db push --linked --dry-run
+supabase db push --linked
 ```
 
-Provision the runtime secret from the ignored `.env`:
+Do not use `--include-seed`; the product has no seeded tester or recommendation records. Verify
+migrations and browser-role denial:
+
+```bash
+supabase db lint --linked --level warning
+```
+
+The migrations create `outside_loop_runtime` as `NOLOGIN`. It can bypass RLS for backend system
+jobs, but it has only DML on product tables, sequence use, the OAuth-state function, and read-only
+migration metadata. It cannot create schema objects, databases, roles, or replication slots. Turn
+on login and set a generated password through an administrative direct/session-pooler connection;
+the `\password` prompt does not echo the value:
+
+```text
+psql "$SUPABASE_ADMIN_URL"
+ALTER ROLE outside_loop_runtime LOGIN;
+\password outside_loop_runtime
+```
+
+Build the serverless transaction-pooler DSN with the custom role and port `6543`:
+
+```text
+postgresql://outside_loop_runtime.<project-ref>:<url-encoded-password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require&gssencmode=disable
+```
+
+Store this only as `SUPABASE_DB_URL` in the ignored root `.env` and AWS Secrets Manager. The
+Postgres adapter disables prepared statements because Supavisor transaction mode does not support
+them. Do not use the `postgres` owner DSN for runtime traffic, and do not put any Supabase URL/key
+in `web/`, Vercel, or a `VITE_*` variable.
+
+Before every schema release:
+
+1. Confirm a restorable backup or PITR point.
+2. Run `supabase db push --linked --dry-run` and review the exact migration set.
+3. Apply forward-only additive migrations before deploying code that depends on them.
+4. Let `scripts/deploy_api_sam.sh` run its migration-history and connectivity preflight.
+5. For recovery, restore Supabase to a new project/branch and validate it before changing the AWS
+   DSN. Do not improvise a destructive down migration in production.
+
+## 3. Prepare Product Secrets
+
+The ignored root `.env` needs these backend values:
+
+```text
+SPOTIFY_APP_CLIENT_ID=<Spotify app client ID>
+SPOTIFY_APP_CLIENT_SECRET=<Spotify app client secret>
+SUPABASE_DB_URL=<TLS transaction-pooler DSN>
+OBSERVABILITY_HASH_KEY=<random 32-512 character value>
+```
+
+Generate the observability HMAC key once and keep it stable across normal deploys so operational
+correlations remain comparable:
+
+```bash
+openssl rand -base64 48
+```
+
+Place the generated value in `.env` without echoing it later. Sync all four values by stdin; the
+script prints only the secret name, region, and action:
 
 ```bash
 AWS_REGION_VALUE=us-east-1 \
-RUNTIME_SECRET_NAME=music-recommender/demo/runtime \
+RUNTIME_SECRET_NAME=music-recommender/product/runtime \
 bash scripts/sync_runtime_secret.sh
 ```
 
-Validate the existing S3 runs and deploy:
+Never run shell tracing around this script. A secret version update alone does not update Lambda's
+resolved environment; redeploy the stack afterward.
+
+## 4. Reserve The Vercel Origin And Configure Spotify
+
+Create/link the Vercel project with root directory `web` before AWS deployment so its stable
+production origin is known. Set the Spotify redirect URI to exactly:
+
+```text
+https://<project>.vercel.app/api/auth/spotify/callback
+```
+
+In Spotify Development Mode, add only the intended tester accounts. Application approval and the
+internal five-user allowlist are separate controls; both must allow a tester.
+
+See [vercel-deployment-runbook.md](vercel-deployment-runbook.md) for the complete frontend sequence.
+
+## 5. Deploy AWS
+
+Validate the active identity without displaying credentials:
 
 ```bash
-uv run music-recommender-demo-readiness check-s3-data \
-  --bucket music-recommender-571600852509-us-east-1 \
-  --catalog-run-id 20260522052343-7123c483 \
-  --profile-run-id profile-20260709-live-smoke
+aws sts get-caller-identity
+```
 
-STACK_NAME=music-recommender-demo \
-AWS_REGION_VALUE=us-east-1 \
-DATA_BUCKET_NAME=music-recommender-571600852509-us-east-1 \
-CATALOG_RUN_ID=20260522052343-7123c483 \
-INTERACTION_RUN_ID=profile-20260709-live-smoke \
+Deploy the product-only stack in compatibility mode first:
+
+```bash
+export STACK_NAME=outside-the-loop-beta
+export AWS_REGION_VALUE=us-east-1
+export APP_BASE_URL=https://<project>.vercel.app
+export MUSICBRAINZ_CONTACT_EMAIL=<operator-contact@example.com>
+export PRODUCT_RUNTIME_SECRET_NAME=music-recommender/product/runtime
+export PRODUCT_AUTH_MODE=hybrid
+export DEPLOY_LEGACY_DEMO=false
+export ENABLE_RESERVED_CONCURRENCY=false
+export SAM_ARTIFACT_BUCKET=outside-the-loop-sam-<account-id>-us-east-1
+export CLOUDFORMATION_EXECUTION_ROLE_ARN=arn:aws:iam::<account-id>:role/outside-the-loop-cloudformation
 bash scripts/deploy_api_sam.sh
 ```
 
-## Live Validation
+The wrapper verifies the runtime-secret shape without printing values, checks production migration
+history/connectivity, builds isolated artifacts, rejects Parquet/CSV/`.env`, enforces package size,
+validates SAM, and deploys CloudFormation.
 
-Run the smoke suite after initial deployment and every stack or secret update:
+Accounts with the default 10-concurrency Lambda quota must keep
+`ENABLE_RESERVED_CONCURRENCY=false`; API Gateway throttling, SQS `MaximumConcurrency=2`, and bounded
+Postgres pools still constrain load. After AWS raises the regional quota above 18, deploy with
+`ENABLE_RESERVED_CONCURRENCY=true` to reserve 5/2/1 executions while retaining 10 unreserved.
+
+Run the unauthenticated/redacted smoke suite:
 
 ```bash
-STACK_NAME=music-recommender-demo \
+STACK_NAME=outside-the-loop-beta \
 AWS_REGION_VALUE=us-east-1 \
 bash scripts/smoke_test_deployed_api.sh
 ```
 
-The suite verifies health/configuration, rejected unauthenticated access, live Spotify profile sync,
-profile status, recommendation creation, feedback persistence, automatic public playlist creation,
-and playlist idempotency. It creates one public playlist with an `AWS Smoke` name. Set
-`SMOKE_USE_OPENAI_AGENT=false` only when isolating deterministic recommendation behavior during an
-OpenAI incident; normal validation exercises the OpenAI agent path.
+It checks `/health`, database `/ready`, rejected unauthenticated product routes, Spotify OAuth
+redirect, disabled legacy routes, and an empty dead-letter queue. It does not create a playlist or
+read a secret.
 
-## Scheduled Profile Refresh
+Confirm the SNS subscription email generated by the stack. Until it is confirmed, CloudWatch
+alarms are visible but do not notify the operator.
 
-The default expression is `cron(0 10 * * ? *)`. Find the generated EventBridge rule and scheduled
-function through stack resources and outputs:
+## 6. Approve Up To Five Testers
 
-```bash
-aws cloudformation describe-stack-resources \
-  --region us-east-1 \
-  --stack-name music-recommender-demo \
-  --query 'StackResources[?ResourceType==`AWS::Events::Rule` || LogicalResourceId==`MusicRecommenderProfileSyncFunction`].[LogicalResourceId,PhysicalResourceId,ResourceType]' \
-  --output table
-```
-
-Invoke the scheduled function directly after credential rotation, then inspect only its redacted
-count response:
+A first Spotify login creates a pending account. Run the CLI against the production DSN from a
+trusted operator environment; output contains account IDs/status only and never token ciphertext:
 
 ```bash
-PROFILE_FUNCTION="$(aws cloudformation describe-stacks \
-  --region us-east-1 \
-  --stack-name music-recommender-demo \
-  --query 'Stacks[0].Outputs[?OutputKey==`ProfileSyncFunctionName`].OutputValue | [0]' \
-  --output text)"
-
-aws lambda invoke \
-  --region us-east-1 \
-  --function-name "$PROFILE_FUNCTION" \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"source":"aws.events","detail-type":"Scheduled Event","detail":{}}' \
-  /tmp/music-recommender-profile-sync.json
-jq '{status, synced_at, source_counts, missing_optional_scopes}' \
-  /tmp/music-recommender-profile-sync.json
+AUTH_MODE=api_key uv run outside-the-loop-beta-admin pending
+AUTH_MODE=api_key uv run outside-the-loop-beta-admin status
+AUTH_MODE=api_key uv run outside-the-loop-beta-admin approve '<spotify-account-id>'
+AUTH_MODE=api_key uv run outside-the-loop-beta-admin revoke '<spotify-account-id>'
+AUTH_MODE=api_key uv run outside-the-loop-beta-admin evaluations
 ```
+
+`outside-the-loop-beta-admin approve` is transactionally capped at five approved, non-deleted
+accounts. Revocation removes refresh-token ciphertext and revokes active sessions. Do not maintain
+a second allowlist in a file or S3.
+
+After owner acceptance and at least one second-account isolation test, redeploy with:
+
+```bash
+PRODUCT_AUTH_MODE=spotify_session bash scripts/deploy_api_sam.sh
+```
+
+Keep `hybrid` available only as a temporary application rollback mode; the product Lambda itself
+still exposes only product routes.
 
 ## Monitoring
 
-List stack alarms and inspect recent Lambda errors:
+List stack outputs and alarm state:
 
 ```bash
-aws cloudwatch describe-alarms \
-  --region us-east-1 \
-  --alarm-name-prefix music-recommender-demo \
-  --query 'MetricAlarms[].{Name:AlarmName,State:StateValue,Reason:StateReason}' \
-  --output table
+aws cloudformation describe-stacks \
+  --region "$AWS_REGION_VALUE" --stack-name "$STACK_NAME" \
+  --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' --output json | jq .
 
-aws logs describe-log-groups \
-  --region us-east-1 \
-  --log-group-name-prefix /aws/lambda/music-recommender-demo \
-  --query 'logGroups[].{Name:logGroupName,Retention:retentionInDays}' \
+aws cloudwatch describe-alarms \
+  --region "$AWS_REGION_VALUE" --alarm-name-prefix "$STACK_NAME" \
+  --query 'MetricAlarms[].{Name:AlarmName,State:StateValue,Reason:StateReason}' \
   --output table
 ```
 
-The alarms have no notification subscriber because no notification endpoint is configured. Add an
-SNS subscription before treating alarms as unattended paging.
+The stack alarms on Lambda errors, handled API 5xx responses, p95 duration, database readiness,
+ListenBrainz/source failures, Spotify reconnect spikes, cleanup failures, queue age, and any DLQ
+message. EMF metrics also include route latency, recommendation source/evidence coverage, cache
+hits/misses, playlist outcomes, queue age, and cleanup counts.
 
-## Secret Rotation
+Tail structured logs without expanding request bodies:
 
-Update `.env`, run `scripts/sync_runtime_secret.sh`, validate Spotify access, and rerun the deploy
-wrapper. A Secrets Manager version update alone does not replace values already resolved into
-Lambda environment variables by CloudFormation.
+```bash
+API_FUNCTION="$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION_VALUE" --stack-name "$STACK_NAME" \
+  --query 'Stacks[0].Outputs[?OutputKey==`ProductApiFunctionName`].OutputValue|[0]' \
+  --output text)"
+aws logs tail "/aws/lambda/$API_FUNCTION" --region "$AWS_REGION_VALUE" --since 15m
+```
 
-The provisioning script preserves the current `RECOMMENDER_API_KEY`. To rotate that key, explicitly
-set a new value in the existing secret through an approved secret-management workflow, redeploy,
-and update clients without printing the value.
+Use `request_id`, route template, status, latency, and HMAC `user_correlation` for incidents. Never
+add prompt/body, Cookie, Authorization, raw account ID, OAuth code, token, provider payload, or
+evaluation comment to a ticket.
 
-## Updating Data Runs
+## Dead-Letter Queue Response
 
-Catalog and offline interaction run IDs are CloudFormation parameters. Extract and validate a new
-run in S3 first, then deploy with new `CATALOG_RUN_ID` and `INTERACTION_RUN_ID` values. Daily profile
-sync updates DynamoDB only; it does not rewrite S3 medallion datasets.
+Any visible dead-letter queue message is an incident:
 
-## Rollback And Recovery
+1. Stop new discovery if failures are systematic by setting API reserved concurrency to zero or
+   disabling the affected adapter through a controlled deployment.
+2. Inspect CloudWatch events by SQS message ID; do not paste message bodies into tickets because
+   they contain internal account/job IDs.
+3. Fix the database/source/configuration cause and deploy.
+4. Redrive only after proving the worker remains idempotent; otherwise leave the message for manual
+   reconciliation.
+5. Confirm queue age, DLQ depth, job state, and source-failure alarms return to `OK`.
 
-- Failed stack deployments use CloudFormation rollback. Inspect stack events before retrying.
-- Revert code/template changes and rerun the deploy wrapper to restore a previous application
-  version.
-- Restore a previous Secrets Manager version and redeploy when credential rotation breaks runtime
-  access.
-- Disable the generated EventBridge rule during a Spotify outage to stop scheduled failures while
-  keeping manual API sync available.
-- DynamoDB point-in-time recovery can restore table state to a new table after accidental writes.
-- Stack deletion retains all four DynamoDB tables. Export and delete retained tables only through a
-  deliberate cleanup operation after confirming they are no longer needed.
+## Spotify Reconnect And Secret Rotation
 
-## Cost Shape
+- Spotify `401` marks the account for reconnect; the user signs in again and a rotated refresh
+  token replaces ciphertext transactionally.
+- Rotate the Spotify client secret or Supabase password in the provider first, update ignored
+  `.env`, run `sync_runtime_secret.sh`, redeploy, and smoke test.
+- For a Supabase rotation, use `\password outside_loop_runtime`, replace only the password in the
+  port-6543 DSN, verify a transaction-pooler connection, then sync and redeploy. The scoped AWS
+  deployment role can write only the named product runtime secret.
+- Rotate `OBSERVABILITY_HASH_KEY` only for a security reason; rotation intentionally breaks
+  correlation continuity.
+- KMS automatic rotation does not require rewriting ciphertext. If replacing the KMS key, deploy a
+  controlled re-encryption migration before retiring the old key.
 
-This stack uses request-based API Gateway/Lambda, DynamoDB on-demand capacity with PITR, one Secrets
-Manager secret, S3 storage/requests, EventBridge scheduling, CloudWatch logs, and two alarms. Charges
-are usage-dependent; PITR, Secrets Manager, logs, and alarms can incur cost even at low traffic.
+## Account Deletion And Retention
 
-## Deployment Validation Record
+Users delete their own account with exact confirmation `DELETE`. The transaction cascades sessions,
+token ciphertext, seeds, preferences, recommendation/evidence, feedback, exports, and evaluations.
+The daily cleanup Lambda removes expired OAuth state, sessions, caches, mappings, jobs, removed
+seeds, and retained recommendation records in bounded batches. Existing Spotify playlists remain
+owned by the user and must be deleted in Spotify if desired.
 
-On 2026-07-09, stack `music-recommender-demo` reached `UPDATE_COMPLETE`. The live validation proved:
+## Rollback
 
-- Public health succeeds and protected profile access returns `401` without the API key.
-- Spotify profile sync reads saved/top/playlist signals and persists the cache in DynamoDB.
-- OpenAI-backed recommendation returns catalog tracks and persists recommendation sessions.
-- Feedback persists and one Spotify smoke playlist was created with idempotent replay.
-- Direct scheduled Lambda invocation succeeds; its EventBridge rule is enabled for
-  `cron(0 10 * * ? *)`.
-- All four DynamoDB tables have point-in-time recovery enabled, both Lambda alarms are `OK`, and
-  Lambda/API access logs retain 14 days.
-- Catalog and profile S3 readiness remains true.
-- Deployment artifacts contain no Parquet or CSV files; those datasets remain in S3.
+Application rollback:
+
+1. Keep the database migration in place if it is backward compatible.
+2. Check out the last known-good commit and rerun `scripts/deploy_api_sam.sh` with the same Vercel
+   origin, secret name, and `DEPLOY_LEGACY_DEMO=false`.
+3. Roll Vercel back to the matching frontend deployment.
+4. Run both smoke scripts and one authenticated owner flow.
+
+Database rollback:
+
+1. Stop product writes by setting product Lambda reserved concurrency to zero.
+2. Restore the verified Supabase backup/PITR point to a separate project.
+3. Run migration and ownership/security tests against the restored database.
+4. Update only `SUPABASE_DB_URL`, sync the secret, redeploy, and re-enable traffic.
+
+Do not switch product reads to DynamoDB, local files, S3, CSV, or Parquet during an incident. If
+safe service cannot be restored, leave `/ready` unavailable and communicate the outage.
+
+## Cost And Capacity
+
+The five-user beta uses on-demand API Gateway/Lambda/SQS/SNS, one customer KMS key, Secrets Manager,
+CloudWatch logs/alarms, Supabase, and Vercel. Reserved Lambda concurrency bounds database/source
+load. Review Supabase connection counts, CloudWatch log retention, alarms, queue age, and monthly
+spend before expanding beyond five approved users.

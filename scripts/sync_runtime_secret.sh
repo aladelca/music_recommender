@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 AWS_REGION_VALUE="${AWS_REGION_VALUE:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}}"
-RUNTIME_SECRET_NAME="${RUNTIME_SECRET_NAME:-music-recommender/demo/runtime}"
+RUNTIME_SECRET_NAME="${RUNTIME_SECRET_NAME:-music-recommender/product/runtime}"
 
-for required_command in aws jq openssl; do
+for required_command in aws jq; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     printf 'Required command is not installed: %s\n' "$required_command" >&2
     exit 1
@@ -25,10 +25,10 @@ set +a
 
 missing_values=()
 for required_value in \
-  OPENAI_API_KEY \
   SPOTIFY_APP_CLIENT_ID \
   SPOTIFY_APP_CLIENT_SECRET \
-  SPOTIFY_USER_REFRESH_TOKEN; do
+  SUPABASE_DB_URL \
+  OBSERVABILITY_HASH_KEY; do
   if [[ -z "${!required_value:-}" ]]; then
     missing_values+=("$required_value")
   fi
@@ -38,40 +38,28 @@ if (( ${#missing_values[@]} > 0 )); then
   printf 'Missing required runtime secret values: %s\n' "${missing_values[*]}" >&2
   exit 1
 fi
+if (( ${#OBSERVABILITY_HASH_KEY} < 32 || ${#OBSERVABILITY_HASH_KEY} > 512 )); then
+  echo "OBSERVABILITY_HASH_KEY must contain between 32 and 512 characters." >&2
+  exit 1
+fi
 
-api_key="${RECOMMENDER_API_KEY:-}"
 secret_action="created"
 if aws secretsmanager describe-secret \
   --region "$AWS_REGION_VALUE" \
   --secret-id "$RUNTIME_SECRET_NAME" >/dev/null 2>&1; then
   secret_action="updated"
-  existing_secret="$(aws secretsmanager get-secret-value \
-    --region "$AWS_REGION_VALUE" \
-    --secret-id "$RUNTIME_SECRET_NAME" \
-    --query SecretString \
-    --output text)"
-  existing_api_key="$(printf '%s' "$existing_secret" | jq -r '.RECOMMENDER_API_KEY // empty')"
-  if [[ -n "$existing_api_key" ]]; then
-    api_key="$existing_api_key"
-  fi
-fi
-
-if (( ${#api_key} < 32 )); then
-  api_key="$(openssl rand -hex 32)"
 fi
 
 secret_json="$(jq -cn \
-  --arg openai_api_key "$OPENAI_API_KEY" \
-  --arg recommender_api_key "$api_key" \
   --arg spotify_client_id "$SPOTIFY_APP_CLIENT_ID" \
   --arg spotify_client_secret "$SPOTIFY_APP_CLIENT_SECRET" \
-  --arg spotify_refresh_token "$SPOTIFY_USER_REFRESH_TOKEN" \
+  --arg supabase_db_url "$SUPABASE_DB_URL" \
+  --arg observability_hash_key "$OBSERVABILITY_HASH_KEY" \
   '{
-    OPENAI_API_KEY: $openai_api_key,
-    RECOMMENDER_API_KEY: $recommender_api_key,
     SPOTIFY_APP_CLIENT_ID: $spotify_client_id,
     SPOTIFY_APP_CLIENT_SECRET: $spotify_client_secret,
-    SPOTIFY_USER_REFRESH_TOKEN: $spotify_refresh_token
+    SUPABASE_DB_URL: $supabase_db_url,
+    OBSERVABILITY_HASH_KEY: $observability_hash_key
   }')"
 
 if [[ "$secret_action" == "updated" ]]; then
@@ -83,7 +71,7 @@ else
   printf '%s' "$secret_json" | aws secretsmanager create-secret \
     --region "$AWS_REGION_VALUE" \
     --name "$RUNTIME_SECRET_NAME" \
-    --description "Runtime credentials for the single-user music recommender API" \
+    --description "Runtime credentials for the Outside the Loop product API" \
     --secret-string file:///dev/stdin >/dev/null
 fi
 

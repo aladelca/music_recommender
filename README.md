@@ -1,328 +1,146 @@
-# Music Recommender
+# Outside the Loop
 
-Local data extraction pipeline for an educational music recommender project.
+Outside the Loop is an explainable music-discovery beta for five Spotify testers. A tester signs
+in with Spotify, explicitly chooses one to five MusicBrainz seeds, requests a discovery mood, sees
+source-backed recommendation evidence, reviews the tracks, and exports a named public or private
+playlist to the same Spotify account.
 
-## Setup
+The active product does not inspect Spotify listening history, saved tracks, top items, or existing
+playlists. Spotify is used for OAuth identity, post-ranking track lookup and attribution, and an
+explicit playlist write. Recommendation data is fetched automatically from MusicBrainz and
+ListenBrainz over HTTPS and cached in backend-only Supabase Postgres. The product uses no local files, S3 datasets, CSV, or Parquet as recommendation inputs or deployment artifacts.
 
-```bash
-uv sync
+## Product Architecture
+
+```text
+Browser
+  -> Vercel React/Vite application
+  -> same-origin /api rewrite
+  -> AWS API Gateway HTTP API
+  -> FastAPI on Lambda
+       -> Supabase Postgres (accounts, sessions, caches, recommendations)
+       -> MusicBrainz API (explicit seed search)
+       -> SQS -> discovery Lambda -> ListenBrainz Core API
+       -> Spotify OAuth/Web API (identity, lookup, playlist export)
+       -> KMS (refresh-token and PKCE encryption)
 ```
 
-Copy `.env.example` values into `.env` and keep real credentials local. The repo already ignores `.env`.
+Vercel is the public frontend edge, so CloudFront is not required. Supabase credentials and Spotify
+secrets exist only in AWS. Product Lambdas have no S3 data configuration or S3 IAM permissions.
+The optional old S3/DynamoDB demo is isolated behind `DeployLegacyDemo=false` by default.
 
-Required Spotify variables:
+The current production frontend is <https://outside-the-loop.vercel.app>. Access remains limited
+to the five-account Spotify beta controls described below.
 
-```bash
-SPOTIFY_APP_CLIENT_ID=...
-SPOTIFY_APP_CLIENT_SECRET=...
-```
+## Repository Layout
 
-## S3 Bootstrap
+- `src/music_recommender/api/product_app.py`: product-only FastAPI application.
+- `src/music_recommender/product/`: account-scoped discovery, recommendation, export, and feedback
+  services.
+- `src/music_recommender/sources/`: bounded MusicBrainz, ListenBrainz, and Spotify clients.
+- `supabase/migrations/`: product schema, constraints, grants, and retention support.
+- `web/`: React 19, TypeScript, Vite, component tests, and Playwright flows.
+- `infra/template.yaml`: API, KMS, FIFO SQS/DLQ, workers, cleanup, logs, metrics, alarms, and SNS.
+- `scripts/`: redacted secret sync, packaging, deployment, and smoke verification.
 
-```bash
-bash scripts/bootstrap_s3_medallion.sh
-```
+## Local Quality Gates
 
-The script creates or verifies a bucket named `music-recommender-<account>-<region>` unless `MUSIC_RECOMMENDER_BUCKET` is already set.
-
-## Local Extraction
-
-Local mode calls APIs but writes files locally under `data/local/<run_id>/`.
-Data tables default to Parquet. Run metadata stays JSON.
-
-```bash
-uv run music-recommender-extract \
-  --seeds docs/base.md \
-  --output local \
-  --file-format parquet \
-  --audio-feature-source reccobeats \
-  --max-tracks-per-artist 5
-```
-
-Use `--log-level DEBUG` for more detailed per-album and lyric lookup logs.
-
-## S3 Extraction
+Install Python and frontend dependencies:
 
 ```bash
-uv run music-recommender-extract \
-  --seeds docs/base.md \
-  --output s3 \
-  --file-format parquet \
-  --audio-feature-source reccobeats \
-  --max-tracks-per-artist 150 \
-  --bucket "$MUSIC_RECOMMENDER_BUCKET"
+uv sync --all-groups --frozen
+npm --prefix web ci
 ```
 
-ReccoBeats is the default audio-feature source because Spotify audio features may be unavailable
-for newer apps. Spotify can still be selected explicitly when access is available:
+Start the local Supabase stack and apply every migration:
 
 ```bash
-ENABLE_SPOTIFY_AUDIO_FEATURES=true uv run music-recommender-extract \
-  --seeds docs/base.md \
-  --output s3 \
-  --max-tracks-per-artist 150 \
-  --bucket "$MUSIC_RECOMMENDER_BUCKET" \
-  --audio-feature-source spotify \
-  --enable-audio-features
+supabase start
+supabase db reset
+supabase db lint --local --level warning
+supabase test db
 ```
 
-## Spotify Profile Extraction
-
-The seed catalog extraction path above builds the reusable catalog. To extract the authenticated
-Spotify user's profile signals into the same local/S3 medallion lake, use the user OAuth refresh
-token flow first, then run:
+Run backend and database tests:
 
 ```bash
-uv run music-recommender-profile-extract \
-  --output local \
-  --file-format parquet \
-  --top-time-ranges short_term medium_term long_term \
-  --top-limit 20 \
-  --saved-limit 50 \
-  --include-playlists \
-  --playlist-limit 10 \
-  --playlist-track-limit 100
+uv run ruff format --check src tests scripts/audit_beta_sources.py
+uv run ruff check src tests scripts/audit_beta_sources.py
+uv run mypy src tests scripts/audit_beta_sources.py
+uv run pytest -q
+
+TEST_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres \
+uv run pytest tests/integration -q
 ```
 
-For S3 output:
+Run frontend gates:
 
 ```bash
-uv run music-recommender-profile-extract \
-  --output s3 \
-  --file-format parquet \
-  --bucket "$MUSIC_RECOMMENDER_BUCKET" \
-  --include-playlists
+npm --prefix web audit --audit-level=high
+npm --prefix web run lint
+npm --prefix web run typecheck
+npm --prefix web run test -- --run
+npm --prefix web run build
+npm --prefix web run test:e2e
 ```
 
-Profile extraction writes non-secret saved-track, top-item, playlist, and optional recently-played
-signals. It does not store Spotify access tokens, refresh tokens, or email.
-
-## Lyrics NLP
-
-Lyrics NLP is optional because it downloads/loads local models.
+Validate AWS packaging. These scripts fail if `.parquet`, `.csv`, or `.env` enters a Lambda
+artifact, and product artifacts must remain below 128 MiB unzipped:
 
 ```bash
-uv sync --extra nlp
-uv run music-recommender-extract \
-  --seeds docs/base.md \
-  --output local \
-  --file-format parquet \
-  --audio-feature-source reccobeats \
-  --enable-lyrics-nlp \
-  --max-tracks-per-artist 2
+bash scripts/prepare_lambda_build.sh
+sam validate --lint --template-file infra/template.yaml
+sam build --template-file infra/template.yaml
+bash scripts/prune_lambda_artifacts.sh
 ```
 
-Language detection uses fastText `lid.176.ftz` and stores the model under
-`~/.cache/music-recommender/models/` by default. Sentiment uses
-`cardiffnlp/twitter-xlm-roberta-base-sentiment-multilingual`.
+## Product Configuration
 
-## Network Data
+Use `.env.example` as the field reference. Product deployment requires:
 
-Spotify does not expose public "who likes/listened to which song" data. For educational
-collaborative-filtering data, use public ListenBrainz dumps.
-
-```bash
-uv run music-recommender-network \
-  --source listenbrainz \
-  --dump-path "$LISTENBRAINZ_DUMP_PATH" \
-  --output local \
-  --file-format parquet \
-  --catalog-tracks-path data/local/<catalog-run-id>/silver/tracks \
-  --catalog-run-id <catalog-run-id> \
-  --limit 10000
+```text
+SPOTIFY_APP_CLIENT_ID
+SPOTIFY_APP_CLIENT_SECRET
+SUPABASE_DB_URL
+OBSERVABILITY_HASH_KEY
+MUSICBRAINZ_CONTACT_EMAIL
+APP_BASE_URL
 ```
 
-## Beta Demo Readiness
+`OBSERVABILITY_HASH_KEY` must be a random 32-512 character secret. Never put `SUPABASE_DB_URL`,
+the Spotify client secret, refresh tokens, or the observability key in `web/` or a `VITE_*`
+variable.
 
-Phase 0 checks that local recommender data is readable and that Spotify user OAuth can refresh a
-token for profile reads and playlist creation. Keep real tokens in `.env`; do not commit them.
+## Deployment
 
-Required demo variables:
+The production sequence is deliberate:
 
-```bash
-OPENAI_API_KEY=...
-SPOTIFY_REDIRECT_URI=https://www.google.com/
-SPOTIFY_USER_REFRESH_TOKEN=...
-SPOTIFY_DEMO_USER_ID=12175364859
-SPOTIFY_USER_SCOPES="user-top-read user-library-read playlist-read-private playlist-modify-private playlist-modify-public"
-RECOMMENDER_DATA_ROOT=data/local
-RECOMMENDER_DATA_MODE=local
-RECOMMENDER_API_KEY=local-demo-key
-```
+1. Provision and migrate Supabase.
+2. Create the Vercel project to reserve its stable production origin.
+3. Register `<vercel-origin>/api/auth/spotify/callback` in Spotify.
+4. Sync the backend runtime secret and deploy the AWS product stack.
+5. Set Vercel's server-only `PRODUCT_API_ORIGIN` to the API Gateway origin and deploy `web/`.
+6. Run AWS and Vercel smoke checks, then approve testers through the admin CLI.
 
-Generate the Spotify authorization URL:
-
-```bash
-uv run music-recommender-demo-readiness auth-url
-```
-
-After approving the app in Spotify and copying the returned `code`, exchange it locally. Use
-`--show-refresh-token` only when you are ready to copy the token into `.env`.
-
-```bash
-uv run music-recommender-demo-readiness exchange-code \
-  --code "<spotify-callback-code>" \
-  --show-refresh-token
-```
-
-Validate the local extracted catalog inputs:
-
-```bash
-uv run music-recommender-demo-readiness check-data \
-  --data-root data/local \
-  --run-id smoke-reccobeats-parquet
-```
-
-Validate catalog inputs in S3:
-
-```bash
-uv run music-recommender-demo-readiness check-s3-data \
-  --bucket "$MUSIC_RECOMMENDER_BUCKET" \
-  --catalog-run-id <catalog-run-id> \
-  --profile-run-id <profile-run-id>
-```
-
-Upload an existing local run to the S3 medallion root:
-
-```bash
-MUSIC_RECOMMENDER_BUCKET="$MUSIC_RECOMMENDER_BUCKET" \
-bash scripts/upload_local_run_to_s3.sh <catalog-run-id>
-```
-
-Validate that the configured refresh token can produce a new user access token without printing the
-access token value:
-
-```bash
-uv run music-recommender-demo-readiness refresh-spotify-token
-```
-
-Validate that the token can read live profile inputs with redacted sample counts. Use
-`--include-playlists` when favorite/private playlist tracks should enrich the profile:
-
-```bash
-uv run music-recommender-demo-readiness check-live-profile --include-playlists
-```
-
-## Agentic Recommender Demo
-
-Phase 2 adds an API-adjacent local command that takes a natural-language prompt and returns
-catalog-backed recommendations as JSON. It uses deterministic intent parsing by default so local
-demo runs do not require an OpenAI API call.
-
-```bash
-uv run music-recommender-agent recommend \
-  --prompt "I just broke up with my girlfriend and I want songs to cheer me up" \
-  --data-root data/local \
-  --catalog-run-id smoke-reccobeats-parquet \
-  --limit 10
-```
-
-To use the OpenAI Agents SDK for live intent parsing, set `OPENAI_API_KEY` in `.env` and add
-`--use-openai-agent`. The recommendation tracks still come only from the deterministic catalog
-ranking tools.
-
-## API-Only Demo
-
-Phase 3 exposes the same backend demo through JSON API calls. Set a local catalog run before
-starting the API:
-
-```bash
-RECOMMENDER_CATALOG_RUN_ID=smoke-reccobeats-parquet
-RECOMMENDER_DATA_ROOT=data/local
-RECOMMENDER_DATA_MODE=local
-```
-
-Run the local API:
-
-```bash
-uv run music-recommender-api --host 127.0.0.1 --port 8000 --reload
-```
-
-Sync the live Spotify profile first when you want recommendations to use saved tracks, top
-tracks/artists, and selected playlist signals:
-
-```bash
-bash scripts/demo_sync_profile.sh
-```
-
-Request recommendations:
-
-```bash
-bash scripts/demo_recommend.sh
-```
-
-Set `create_playlist: true`, optionally provide `playlist_name`, and leave `playlist_public: true`
-to create a public Spotify playlist in the same recommendation call. The response includes its URL
-under `playlist_result`.
-
-Alternatively, create a Spotify playlist after explicitly choosing tracks from a recommendation
-response:
-
-```bash
-SESSION_ID=<session-id> \
-TRACK_IDS_JSON='["spotify-track-id-1","spotify-track-id-2"]' \
-bash scripts/demo_create_playlist.sh
-```
-
-`SESSION_ID` must be a real recommendation session returned by `POST /recommendations`, and
-`TRACK_IDS_JSON` must be a non-empty subset of the track IDs returned in that same response. The API
-rejects unknown sessions and tracks that were not recommended for that session.
-
-Profile sync and playlist creation require `SPOTIFY_USER_REFRESH_TOKEN` with the configured user
-scopes. The API stores local demo state under `data/local/api_state/` by default.
-
-For the full local testing sequence, including required `.env` values, readiness checks, API calls,
-feedback, and Spotify playlist creation, see [docs/local-demo-runbook.md](docs/local-demo-runbook.md).
-
-## Operational AWS Deployment
-
-The operational deployment is a secured single-user backend API. S3 stores the extracted catalog
-and offline profile datasets, Lambda/API Gateway runs FastAPI, DynamoDB stores runtime state,
-Secrets Manager stores credentials, and EventBridge refreshes the live Spotify profile cache daily.
-
-Install SAM, sync the ignored local `.env` values into Secrets Manager, deploy the validated S3
-runs, and execute the live smoke suite:
-
-```bash
-brew install aws-sam-cli
-
-AWS_REGION_VALUE=us-east-1 \
-RUNTIME_SECRET_NAME=music-recommender/demo/runtime \
-bash scripts/sync_runtime_secret.sh
-
-STACK_NAME=music-recommender-demo \
-AWS_REGION_VALUE=us-east-1 \
-DATA_BUCKET_NAME=music-recommender-571600852509-us-east-1 \
-CATALOG_RUN_ID=20260522052343-7123c483 \
-INTERACTION_RUN_ID=profile-20260709-live-smoke \
-bash scripts/deploy_api_sam.sh
-
-STACK_NAME=music-recommender-demo \
-AWS_REGION_VALUE=us-east-1 \
-bash scripts/smoke_test_deployed_api.sh
-```
-
-The smoke suite creates one public Spotify playlist named `Music Recommender AWS Smoke ...` and
-then verifies that replaying the request does not create another playlist. It does not print the API
-key, OAuth token, Spotify profile payload, or runtime secret.
-
-See [docs/operational-aws-runbook.md](docs/operational-aws-runbook.md) for monitoring, secret
-rotation, data-run updates, retained DynamoDB tables, costs, and rollback procedures.
+Detailed commands and rollback procedures are in the deployment runbooks below.
 
 ## Runbooks
 
-- [Deployed API usage](docs/api-usage-runbook.md): secure authentication, profile sync,
-  recommendations, feedback, playlists, and error handling.
-- [AWS deployment architecture](docs/aws-deployment-architecture-runbook.md): live resources, data
-  flows, IAM boundaries, artifact contents, reliability, and known production gaps.
-- [Recommender scientific methodology](docs/recommender-methodology-runbook.md): profile signals,
-  implemented scoring equations, guardrails, reproducibility, evaluation, and limitations.
+- [API usage](docs/api-usage-runbook.md): browser-session authentication, Postman/curl examples,
+  discovery, recommendations, review-first playlist export, feedback, and deletion.
+- [AWS architecture](docs/aws-deployment-architecture-runbook.md): topology, trust boundaries, IAM,
+  data flow, reliability, and the no-file product boundary.
+- [AWS operations](docs/operational-aws-runbook.md): Supabase migration, secret sync, deployment,
+  five-user approval, monitoring, incidents, rotation, and rollback.
+- [Vercel deployment](docs/vercel-deployment-runbook.md): project setup, rewrite variables, Spotify
+  callback configuration, headers, previews, and production verification.
+- [Scientific methodology](docs/recommender-methodology-runbook.md): candidate sources, frozen
+  ranking equation, evidence, coverage gates, and the five-tester evaluation protocol.
+- [Privacy notice](docs/privacy-notice.md): processed data, retention, user choices, and deletion.
 
-## Validation
+## Legacy Demo
 
-```bash
-uv run ruff format --check src tests
-uv run ruff check src tests
-uv run mypy src tests
-uv run pytest
-```
+The repository still contains an educational single-user pipeline and legacy API that can extract
+local/S3 datasets and use DynamoDB. Those modules are not part of Outside the Loop, are not built
+into the thin product functions, and deploy only when `DeployLegacyDemo=true` is explicitly set.
+Do not enable that condition for the five-user product stack.

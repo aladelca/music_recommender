@@ -133,7 +133,6 @@ class DemoApiService:
         playlist_service = PlaylistService(
             spotify_client=self._spotify_user_client(settings),
             store=self._playlist_store(settings),
-            user_id=settings.spotify_demo_user_id,
         )
         result = playlist_service.create_playlist(
             session_id=request.session_id,

@@ -126,6 +126,12 @@ Detailed commands and rollback procedures are in the deployment runbooks below.
 
 ## Runbooks
 
+- [Product API, backend, and frontend reference](docs/product-api-backend-frontend.md): deployed
+  boundaries, endpoint matrix, authentication, service layers, Supabase persistence, frontend state,
+  and validation.
+- [Recommender science and architecture reference](docs/recommender-science-architecture.md):
+  candidate pipeline, frozen scoring equation, evidence validation, reproducibility, evaluation
+  design, and validity limits.
 - [API usage](docs/api-usage-runbook.md): browser-session authentication, Postman/curl examples,
   discovery, recommendations, review-first playlist export, feedback, and deletion.
 - [AWS architecture](docs/aws-deployment-architecture-runbook.md): topology, trust boundaries, IAM,

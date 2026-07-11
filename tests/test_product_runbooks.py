@@ -90,3 +90,45 @@ def test_readme_and_infra_readme_present_product_before_isolated_legacy_demo() -
     assert "OutsideTheLoopApiFunction" in infra
     assert "DeployLegacyDemo=false" in infra
     assert "Product functions have no S3" in infra
+
+
+def test_consolidated_product_and_recommender_references_cover_implemented_contracts() -> None:
+    application = Path("docs/product-api-backend-frontend.md").read_text()
+    recommender = Path("docs/recommender-science-architecture.md").read_text()
+    readme = Path("README.md").read_text()
+
+    for expected in (
+        "https://outside-the-loop.vercel.app/api",
+        "__Host-mr_session",
+        "X-CSRF-Token",
+        "POST /me/recommendations",
+        "PUT /me/recommendations/{session_id}/selection",
+        "Idempotency-Key",
+        "FastAPI",
+        "Supabase Postgres",
+        "React Query",
+        "Zod",
+        "OpenAPI is intentionally disabled",
+        "Cross-account",
+    ):
+        assert expected in application
+
+    for expected in (
+        "explicit-discovery-v1",
+        "deterministic-intent-v1",
+        "evidence-v1",
+        "Spotify is not a ranking input",
+        "prompt_tag_fit",
+        "seed_bridge_strength",
+        "discovery_value",
+        "evidence_quality",
+        "post-ranking",
+        "five testers",
+        "three sessions",
+        "descriptive",
+        "statistical significance",
+    ):
+        assert expected in recommender
+
+    assert "docs/product-api-backend-frontend.md" in readme
+    assert "docs/recommender-science-architecture.md" in readme

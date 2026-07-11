@@ -65,6 +65,8 @@ class MusicBrainzClient:
         contact_email: str,
         app_version: str,
         http: ApiHttpClient | None = None,
+        request_timeout_seconds: float = 20.0,
+        request_max_retries: int = 3,
     ) -> None:
         normalized_email = contact_email.strip()
         if (
@@ -76,8 +78,20 @@ class MusicBrainzClient:
         normalized_version = app_version.strip()
         if not normalized_version or any(character.isspace() for character in normalized_version):
             raise ValueError("MusicBrainz app version must not be empty or contain whitespace.")
+        if request_timeout_seconds <= 0 or request_timeout_seconds > 30:
+            raise ValueError(
+                "MusicBrainz request timeout must be greater than zero and at most 30."
+            )
+        if not 0 <= request_max_retries <= 5:
+            raise ValueError("MusicBrainz request retries must be between zero and five.")
         self.user_agent = f"OutsideTheLoop/{normalized_version} ({normalized_email})"
-        self.http = http or ApiHttpClient(base_url=MUSICBRAINZ_BASE_URL)
+        self.request_timeout_seconds = request_timeout_seconds
+        self.request_max_retries = request_max_retries
+        self.http = http or ApiHttpClient(
+            base_url=MUSICBRAINZ_BASE_URL,
+            timeout=request_timeout_seconds,
+            max_retries=request_max_retries,
+        )
 
     def close(self) -> None:
         self.http.close()

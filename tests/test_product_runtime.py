@@ -9,6 +9,7 @@ import pytest
 
 from music_recommender.api.product_runtime import build_product_auth_runtime
 from music_recommender.config import load_settings
+from music_recommender.sources.musicbrainz import MusicBrainzClient
 from music_recommender.sources.spotify_user import SpotifyUserClient
 from music_recommender.storage.postgres import PostgresDatabase
 
@@ -86,3 +87,9 @@ def test_product_auth_runtime_wires_backend_only_dependencies(
         assert spotify.request_max_retries == 0
     finally:
         spotify.close()
+    musicbrainz = cast(MusicBrainzClient, runtime.seed_service.musicbrainz)
+    try:
+        assert musicbrainz.request_timeout_seconds == 4.0
+        assert musicbrainz.request_max_retries == 0
+    finally:
+        musicbrainz.close()

@@ -80,6 +80,8 @@ def build_product_auth_runtime(
     musicbrainz = MusicBrainzClient(
         contact_email=resolved_settings.musicbrainz_contact_email,
         app_version="0.1.0",
+        request_timeout_seconds=4.0,
+        request_max_retries=0,
     )
     oauth = OAuthService(
         client_id=resolved_settings.spotify_client_id,

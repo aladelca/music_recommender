@@ -220,7 +220,6 @@ class FakeSpotifyPlaylistClient:
 
     def create_playlist(
         self,
-        user_id: str,
         *,
         name: str,
         description: str = "",

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 TopTimeRange = Literal["short_term", "medium_term", "long_term"]
 
@@ -32,7 +33,19 @@ class ConfigPresence(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     version: str
-    config: ConfigPresence
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "unavailable"]
+
+
+class SeedSelectionRequest(BaseModel):
+    entity_type: Literal["artist", "recording"]
+    mbid: UUID
+
+
+class ReplaceSeedsRequest(BaseModel):
+    seeds: list[SeedSelectionRequest] = Field(min_length=1, max_length=5)
 
 
 class RecommendationRequest(BaseModel):
@@ -49,6 +62,55 @@ class RecommendationRequest(BaseModel):
     liked_track_ids: list[str] = Field(default_factory=list)
     known_track_ids: list[str] = Field(default_factory=list)
     blocked_artist_names: list[str] = Field(default_factory=list)
+
+
+class ProductRecommendationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(min_length=2, max_length=500)
+    adventure: Literal["familiar", "balanced", "adventurous"] = "balanced"
+    allow_explicit: bool = True
+    seed_ids: list[UUID] = Field(min_length=1, max_length=5)
+
+
+class ReviewRecommendationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recording_mbids: list[UUID] = Field(min_length=1, max_length=10)
+    playlist_name: str = Field(min_length=1, max_length=100)
+    public: bool = False
+
+
+class ProductPlaylistExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=300)
+    public: bool
+    recording_mbids: list[UUID] = Field(min_length=1, max_length=20)
+
+
+class ProductFeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recording_mbid: UUID
+    event_type: Literal["like", "dislike", "hide_artist", "save", "skip"]
+    reason: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class SessionEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    comparison: Literal["better", "same", "worse", "not_sure"]
+    explanation_usefulness: int = Field(ge=1, le=5)
+    novelty_quality: int = Field(ge=1, le=5)
+    comment: str | None = Field(default=None, min_length=1, max_length=1_000)
+
+
+class AccountDeletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: Literal["DELETE"]
 
 
 class PlaylistCreateRequest(BaseModel):

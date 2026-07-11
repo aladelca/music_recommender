@@ -61,6 +61,8 @@ def test_demo_api_service_rejects_feedback_for_unknown_session(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
+    remove_spotify_credentials(monkeypatch)
     monkeypatch.setenv("RECOMMENDER_SESSION_STORE_PATH", str(tmp_path / "sessions.json"))
     monkeypatch.setenv("RECOMMENDER_FEEDBACK_STORE_PATH", str(tmp_path / "feedback.json"))
     client = TestClient(create_app(load_env=False, service=DemoApiService()))
@@ -82,6 +84,8 @@ def test_demo_api_service_rejects_feedback_for_track_outside_session(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
+    remove_spotify_credentials(monkeypatch)
     session_path = tmp_path / "sessions.json"
     JsonRecommendationSessionStore(session_path).put(build_session())
     monkeypatch.setenv("RECOMMENDER_SESSION_STORE_PATH", str(session_path))
@@ -107,6 +111,8 @@ def test_demo_api_service_records_feedback_for_session_track(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
+    remove_spotify_credentials(monkeypatch)
     session_path = tmp_path / "sessions.json"
     feedback_path = tmp_path / "feedback.json"
     JsonRecommendationSessionStore(session_path).put(build_session())
@@ -142,6 +148,16 @@ class FakeApiService:
             "event_id": "feedback-1",
             "status": "recorded",
         }
+
+
+def remove_spotify_credentials(monkeypatch: Any) -> None:
+    for name in (
+        "SPOTIFY_APP_CLIENT_ID",
+        "SPOTIFY_APP_CLIENT_SECRET",
+        "SPOTIFY_CLIENT_ID",
+        "SPOTIFY_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def build_session() -> RecommendationSession:

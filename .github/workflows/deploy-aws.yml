@@ -1,0 +1,64 @@
+name: Deploy AWS Product
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_base_url:
+        description: Exact Vercel production origin
+        required: true
+        type: string
+      auth_mode:
+        description: Product authentication mode
+        required: true
+        default: hybrid
+        type: choice
+        options:
+          - hybrid
+          - spotify_session
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: outside-the-loop-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - uses: aws-actions/setup-sam@v2
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: outside-the-loop-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: uv sync --all-groups --frozen
+      - run: aws sts get-caller-identity
+      - name: Deploy product stack
+        env:
+          STACK_NAME: ${{ vars.AWS_STACK_NAME }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          PRODUCT_RUNTIME_SECRET_NAME: ${{ vars.PRODUCT_RUNTIME_SECRET_NAME }}
+          MUSICBRAINZ_CONTACT_EMAIL: ${{ vars.MUSICBRAINZ_CONTACT_EMAIL }}
+          APP_BASE_URL: ${{ inputs.app_base_url }}
+          PRODUCT_AUTH_MODE: ${{ inputs.auth_mode }}
+          DEPLOY_LEGACY_DEMO: "false"
+          ENABLE_RESERVED_CONCURRENCY: "false"
+          SAM_ARTIFACT_BUCKET: ${{ vars.AWS_SAM_ARTIFACT_BUCKET }}
+          CLOUDFORMATION_EXECUTION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN }}
+        run: bash scripts/deploy_api_sam.sh
+      - name: Smoke product stack
+        env:
+          STACK_NAME: ${{ vars.AWS_STACK_NAME }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+        run: bash scripts/smoke_test_deployed_api.sh

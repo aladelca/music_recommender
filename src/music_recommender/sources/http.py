@@ -62,22 +62,42 @@ class ApiHttpClient:
     ) -> httpx.Response:
         return self.request("POST", path, expected_statuses=expected_statuses, **kwargs)
 
+    def put(
+        self,
+        path: str,
+        *,
+        expected_statuses: Iterable[int] = (200,),
+        **kwargs: Any,
+    ) -> httpx.Response:
+        return self.request("PUT", path, expected_statuses=expected_statuses, **kwargs)
+
     def request(
         self,
         method: str,
         path: str,
         *,
         expected_statuses: Iterable[int] = (200,),
+        retry: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
         expected = set(expected_statuses)
         last_response: httpx.Response | None = None
         for attempt in range(self.max_retries + 1):
-            response = self._client.request(method, path, **kwargs)
+            try:
+                response = self._client.request(method, path, **kwargs)
+            except httpx.RequestError:
+                if retry and attempt < self.max_retries:
+                    self._sleep(min(2.0**attempt, 30.0))
+                    continue
+                raise ApiError(
+                    status_code=0,
+                    url=path,
+                    message="Transport request failed",
+                ) from None
             last_response = response
             if response.status_code in expected:
                 return response
-            if self._should_retry(response.status_code) and attempt < self.max_retries:
+            if retry and self._should_retry(response.status_code) and attempt < self.max_retries:
                 self._sleep(self._retry_delay(response, attempt))
                 continue
             raise self._error_from_response(response)

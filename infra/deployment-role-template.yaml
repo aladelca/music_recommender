@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Scoped GitHub OIDC and CloudFormation deployment roles for Outside the Loop.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: aladelca
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubRepo:
+    Type: String
+    Default: music_recommender
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  ProductStackPrefix:
+    Type: String
+    Default: outside-the-loop-
+    AllowedPattern: "^[a-z0-9-]+-$"
+  ProductRuntimeSecretName:
+    Type: String
+    Default: music-recommender/product/runtime
+
+Resources:
+  GitHubActionsOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Product
+          Value: outside-the-loop
+
+  SamArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: "outside-the-loop-sam-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNoncurrentArtifacts
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Product
+          Value: outside-the-loop
+
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: outside-the-loop-cloudformation
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ProvisionOutsideTheLoopProduct
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ProductApiResources
+                Effect: Allow
+                Action:
+                  - apigateway:*
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - events:*
+                  - lambda:*
+                  - logs:*
+                  - sns:*
+                  - sqs:*
+                Resource: "*"
+              - Sid: SamTransform
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                Resource:
+                  Fn::Sub: >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+              - Sid: ProductEncryptionResources
+                Effect: Allow
+                Action:
+                  - kms:CreateAlias
+                  - kms:CreateKey
+                  - kms:DeleteAlias
+                  - kms:DescribeKey
+                  - kms:DisableKey
+                  - kms:EnableKeyRotation
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                  - kms:ListResourceTags
+                  - kms:PutKeyPolicy
+                  - kms:ScheduleKeyDeletion
+                  - kms:TagResource
+                  - kms:UntagResource
+                  - kms:UpdateAlias
+                  - kms:UpdateKeyDescription
+                Resource: "*"
+              - Sid: ProductFunctionRoles
+                Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateAssumeRolePolicy
+                Resource:
+                  Fn::Sub: "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProductStackPrefix}*"
+              - Sid: ProductRuntimeSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  Fn::Sub: >-
+                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProductRuntimeSecretName}-*
+              - Sid: ReadDeploymentArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  Fn::Sub: "${SamArtifactBucket.Arn}/*"
+
+  DeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: outside-the-loop-deployment
+      MaxSessionDuration: 14400
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LocalAccountBootstrap
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: sts:AssumeRole
+          - Sid: GitHubProductionEnvironment
+            Effect: Allow
+            Principal:
+              Federated:
+                Ref: GitHubActionsOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  Fn::Sub: "repo:${GitHubOrg}/${GitHubRepo}:environment:production"
+      Policies:
+        - PolicyName: DeployOutsideTheLoopProduct
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ProductStackChanges
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DeleteStack
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStackResources
+                  - cloudformation:UpdateStack
+                Resource:
+                  Fn::Sub: >-
+                    arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProductStackPrefix}*/*
+              - Sid: ValidateTemplates
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Sid: ArtifactBucketMetadata
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                Resource:
+                  Fn::GetAtt:
+                    - SamArtifactBucket
+                    - Arn
+              - Sid: ArtifactObjects
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  Fn::Sub: "${SamArtifactBucket.Arn}/*"
+              - Sid: RuntimeSecretManagement
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                Resource:
+                  Fn::Sub: >-
+                    arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProductRuntimeSecretName}-*
+              - Sid: PassCloudFormationExecutionRole
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  Fn::GetAtt:
+                    - CloudFormationExecutionRole
+                    - Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: ProductQueueSmokeCheck
+                Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                Resource:
+                  Fn::Sub: "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${ProductStackPrefix}*"
+
+Outputs:
+  DeploymentRoleArn:
+    Value:
+      Fn::GetAtt:
+        - DeploymentRole
+        - Arn
+  CloudFormationExecutionRoleArn:
+    Value:
+      Fn::GetAtt:
+        - CloudFormationExecutionRole
+        - Arn
+  SamArtifactBucketName:
+    Value:
+      Ref: SamArtifactBucket

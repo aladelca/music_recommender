@@ -33,7 +33,7 @@ def test_runtime_secret_script_fails_before_aws_when_env_is_incomplete(
     assert not marker.exists()
 
 
-def test_runtime_secret_script_preserves_api_key_and_redacts_values(tmp_path: Path) -> None:
+def test_runtime_secret_script_writes_product_values_and_redacts_them(tmp_path: Path) -> None:
     capture_file = tmp_path / "secret.json"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -59,8 +59,8 @@ esac
     env_file.write_text(
         "SPOTIFY_APP_CLIENT_ID=dummy-client-id\n"
         "SPOTIFY_APP_CLIENT_SECRET=dummy-client-secret\n"
-        "SPOTIFY_USER_REFRESH_TOKEN=dummy-refresh-token\n"
-        "OPENAI_API_KEY=dummy-openai-key\n"
+        "SUPABASE_DB_URL=postgresql://example.invalid/product?sslmode=require\n"
+        "OBSERVABILITY_HASH_KEY=dummy-observability-key-that-is-long-enough\n"
     )
 
     result = _run_secret_script(
@@ -72,11 +72,10 @@ esac
     assert result.returncode == 0, result.stderr
     payload = json.loads(capture_file.read_text())
     assert payload == {
-        "OPENAI_API_KEY": "dummy-openai-key",
-        "RECOMMENDER_API_KEY": "existing-api-key-that-is-long-enough-123456",
         "SPOTIFY_APP_CLIENT_ID": "dummy-client-id",
         "SPOTIFY_APP_CLIENT_SECRET": "dummy-client-secret",
-        "SPOTIFY_USER_REFRESH_TOKEN": "dummy-refresh-token",
+        "SUPABASE_DB_URL": "postgresql://example.invalid/product?sslmode=require",
+        "OBSERVABILITY_HASH_KEY": "dummy-observability-key-that-is-long-enough",
     }
     combined_output = result.stdout + result.stderr
     for secret_value in payload.values():
@@ -92,48 +91,58 @@ def test_runtime_secret_script_does_not_put_secret_json_in_process_arguments() -
     assert '--secret-string "$secret_json"' not in script
 
 
-def test_deploy_script_checks_data_before_sam_deploy() -> None:
+def test_deploy_script_checks_product_database_and_packages_before_sam_deploy() -> None:
     script = DEPLOY_SCRIPT.read_text()
 
+    assert "music_recommender.deployment_preflight" in script
+    assert "SUPABASE_DB_URL" in script
+    assert "OBSERVABILITY_HASH_KEY" in script
+    assert "ProductRuntimeSecretName=" in script
+    assert "AppBaseUrl=" in script
+    assert "MusicBrainzContactEmail=" in script
+    assert 'if [[ "$DEPLOY_LEGACY_DEMO_VALUE" == "true" ]]' in script
     assert "check-s3-data" in script
-    assert "--profile-run-id" in script
     assert "sam validate --lint" in script
     assert "--no-confirm-changeset" in script
     assert "--no-fail-on-empty-changeset" in script
-    assert "ProfileSyncScheduleExpression=" not in script
+    assert "--resolve-s3" not in script
+    assert "--s3-bucket" in script
+    assert "--role-arn" in script
     assert "bash scripts/prepare_lambda_build.sh" in script
     assert "bash scripts/prune_lambda_artifacts.sh" in script
     assert "MAX_LAMBDA_UNZIPPED_KB=262144" in script
+    assert "MAX_PRODUCT_UNZIPPED_KB=131072" in script
     assert "MusicRecommenderApiFunction" in script
     assert "MusicRecommenderProfileSyncFunction" in script
+    assert "OutsideTheLoopApiFunction" in script
+    assert "OutsideTheLoopDiscoveryWorkerFunction" in script
+    assert "OutsideTheLoopCleanupFunction" in script
     assert "parameter_overrides=(" in script
-    assert 'if [[ -n "$DATA_PREFIX" ]]' in script
-    assert 'if [[ -n "$OPENAI_AGENT_MODEL_VALUE" ]]' in script
-    assert 'DataPrefix="${DATA_PREFIX}"' not in script
+    assert '"DeployLegacyDemo=${DEPLOY_LEGACY_DEMO_VALUE}"' in script
+    assert '"EnableReservedConcurrency=${ENABLE_RESERVED_CONCURRENCY_VALUE}"' in script
+    assert "set -x" not in script
 
 
-def test_smoke_script_covers_protected_operational_flow_without_exposing_api_key() -> None:
+def test_smoke_script_covers_product_health_auth_and_queue_without_secrets() -> None:
     script = SMOKE_SCRIPT.read_text()
 
     assert "aws cloudformation describe-stacks" in script
-    assert "aws secretsmanager get-secret-value" in script
-    assert "printf 'X-API-Key: %s\\n' \"$api_key\"" in script
-    assert '-H "@$auth_header_file"' in script
-    assert '-H "X-API-Key: $api_key"' not in script
+    assert "aws secretsmanager get-secret-value" not in script
+    assert "RECOMMENDER_API_KEY" not in script
     for path in (
         "/health",
-        "/profile/sync",
-        "/profile",
+        "/ready",
+        "/auth/me",
+        "/auth/spotify/start",
+        "/me/seeds",
         "/recommendations",
-        "/feedback",
-        "/playlists",
     ):
         assert path in script
     assert 'assert_status "401"' in script
-    assert "playlist_public: true" in script
-    assert ".playlist_result.playlist_id" in script
-    assert "select(.playlist_result.idempotent_replay == false)" in script
-    assert "select(.idempotent_replay == true)" in script
+    assert 'assert_status "404"' in script
+    assert "accounts.spotify.com/authorize" in script
+    assert "ApproximateNumberOfMessages" in script
+    assert "create_playlist" not in script
 
 
 def test_lambda_build_context_contains_only_source_and_scoped_requirements(
@@ -152,11 +161,17 @@ def test_lambda_build_context_contains_only_source_and_scoped_requirements(
     assert result.returncode == 0, result.stderr
     api_root = build_root / "api"
     scheduler_root = build_root / "profile-sync"
+    product_root = build_root / "product-api"
+    worker_root = build_root / "discovery-worker"
+    cleanup_root = build_root / "cleanup"
     assert (api_root / "src/music_recommender/api/lambda_handler.py").is_file()
     assert (scheduler_root / "src/music_recommender/api/scheduled_profile_handler.py").is_file()
+    assert (product_root / "src/music_recommender/api/product_lambda_handler.py").is_file()
+    assert (worker_root / "src/music_recommender/api/discovery_worker_handler.py").is_file()
+    assert (cleanup_root / "src/music_recommender/api/cleanup_handler.py").is_file()
     assert not (api_root / "data").exists()
     assert not (scheduler_root / "data").exists()
-    for context_root in (api_root, scheduler_root):
+    for context_root in (api_root, scheduler_root, product_root, worker_root, cleanup_root):
         assert list(context_root.rglob("*.parquet")) == []
         assert list(context_root.rglob("*.csv")) == []
 
@@ -171,6 +186,16 @@ def test_lambda_build_context_contains_only_source_and_scoped_requirements(
     assert "pyarrow" not in scheduler_requirements
     assert "openai" not in scheduler_requirements
     assert "fastapi" not in scheduler_requirements
+    product_requirements = (product_root / "requirements.txt").read_text().lower()
+    worker_requirements = (worker_root / "requirements.txt").read_text().lower()
+    cleanup_requirements = (cleanup_root / "requirements.txt").read_text().lower()
+    assert "fastapi==" in product_requirements
+    assert "mangum==" in product_requirements
+    assert "psycopg" in product_requirements
+    for forbidden_dependency in ("pyarrow", "openai", "pandas", "numpy"):
+        assert forbidden_dependency not in product_requirements
+        assert forbidden_dependency not in worker_requirements
+        assert forbidden_dependency not in cleanup_requirements
 
 
 def test_lambda_build_script_rejects_parquet_and_csv_files_explicitly() -> None:
@@ -189,7 +214,7 @@ def test_lambda_artifact_pruning_removes_pyarrow_test_data(tmp_path: Path) -> No
     source_file = artifact_root / "MusicRecommenderApiFunction/src/app.py"
     source_file.parent.mkdir(parents=True)
     source_file.write_text("value = 1\n")
-    (artifact_root / "MusicRecommenderProfileSyncFunction").mkdir()
+    _create_other_artifact_directories(artifact_root)
 
     result = subprocess.run(
         ["bash", str(PRUNE_ARTIFACTS_SCRIPT)],
@@ -210,7 +235,7 @@ def test_lambda_artifact_pruning_rejects_unexpected_csv(tmp_path: Path) -> None:
     api_root = artifact_root / "MusicRecommenderApiFunction"
     api_root.mkdir(parents=True)
     (api_root / "unexpected.csv").write_text("must-not-deploy")
-    (artifact_root / "MusicRecommenderProfileSyncFunction").mkdir()
+    _create_other_artifact_directories(artifact_root)
 
     result = subprocess.run(
         ["bash", str(PRUNE_ARTIFACTS_SCRIPT)],
@@ -238,6 +263,8 @@ def _run_secret_script(
         "SPOTIFY_APP_CLIENT_ID": "",
         "SPOTIFY_APP_CLIENT_SECRET": "",
         "SPOTIFY_USER_REFRESH_TOKEN": "",
+        "SUPABASE_DB_URL": "",
+        "OBSERVABILITY_HASH_KEY": "",
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "ENV_FILE": str(env_file),
         "AWS_REGION_VALUE": "us-east-1",
@@ -252,6 +279,16 @@ def _run_secret_script(
         text=True,
         check=False,
     )
+
+
+def _create_other_artifact_directories(artifact_root: Path) -> None:
+    for name in (
+        "MusicRecommenderProfileSyncFunction",
+        "OutsideTheLoopApiFunction",
+        "OutsideTheLoopDiscoveryWorkerFunction",
+        "OutsideTheLoopCleanupFunction",
+    ):
+        (artifact_root / name).mkdir(parents=True, exist_ok=True)
 
 
 def _write_executable(path: Path, content: str) -> None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from music_recommender.storage.protocols import CandidateEdgeRecord, MusicEntityRecord
+
 
 @dataclass(frozen=True)
 class AudioFeatures:
@@ -94,3 +96,26 @@ class RecommendationCandidate:
     track: CatalogTrack
     score: ScoreBreakdown
     explanation: str
+
+
+@dataclass(frozen=True)
+class DiscoveryRankingPreferences:
+    blocked_artist_mbids: tuple[str, ...] = ()
+    blocked_recording_mbids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DiscoveryScoreBreakdown:
+    prompt_tag_fit: float
+    seed_bridge_strength: float
+    discovery_value: float
+    evidence_quality: float
+    total: float
+
+
+@dataclass(frozen=True)
+class RankedDiscoveryCandidate:
+    entity: MusicEntityRecord
+    edges: tuple[CandidateEdgeRecord, ...]
+    score: DiscoveryScoreBreakdown
+    ranking_version: str

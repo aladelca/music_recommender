@@ -98,7 +98,6 @@ def test_playlist_service_is_idempotent_by_session(tmp_path: Path) -> None:
     service = PlaylistService(
         spotify_client=spotify,
         store=JsonPlaylistRecordStore(tmp_path / "playlists.json"),
-        user_id="12175364859",
     )
 
     first = service.create_playlist(
@@ -130,7 +129,6 @@ def test_playlist_service_does_not_create_duplicate_playlist_after_add_failure(
     service = PlaylistService(
         spotify_client=spotify,
         store=JsonPlaylistRecordStore(tmp_path / "playlists.json"),
-        user_id="12175364859",
     )
 
     first = service.create_playlist(
@@ -313,14 +311,12 @@ class FakeSpotifyPlaylistClient:
 
     def create_playlist(
         self,
-        user_id: str,
         *,
         name: str,
         description: str = "",
         public: bool = False,
     ) -> dict[str, Any]:
         self.created_count += 1
-        assert user_id == "12175364859"
         assert name == "Breakup Recovery"
         assert description == "Class demo"
         assert public is False

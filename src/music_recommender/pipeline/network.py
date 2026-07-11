@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from music_recommender.ingest.parse_base import normalize_lookup_key
 from music_recommender.models import (
     ExtractionSummary,
     JsonDict,
@@ -14,6 +13,7 @@ from music_recommender.models import (
     ListenBrainzListenRecord,
     UserTrackInteractionRecord,
 )
+from music_recommender.normalization import normalize_lookup_key
 from music_recommender.sources.listenbrainz import ListenBrainzDumpReader
 from music_recommender.storage.s3 import FileFormat, S3Storage, medallion_data_key, run_metadata_key
 

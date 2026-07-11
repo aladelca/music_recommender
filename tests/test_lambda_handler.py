@@ -30,7 +30,7 @@ def test_lambda_handler_serves_health_without_aws(
     assert response["statusCode"] == 200
     body = json.loads(str(response["body"]))
     assert body["status"] == "ok"
-    assert body["config"]["spotify_client_id_present"] is True
+    assert set(body) == {"status", "version"}
     assert "spotify-secret" not in response["body"]
 
 

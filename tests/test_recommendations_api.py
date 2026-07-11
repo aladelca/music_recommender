@@ -408,7 +408,6 @@ def test_demo_api_service_persists_recommendation_session(
     }
     assert spotify.created_requests == [
         {
-            "user_id": "12175364859",
             "name": "Persisted Recovery Mix",
             "description": ("Generated from prompt: I just broke up and want songs to cheer me up"),
             "public": True,
@@ -437,7 +436,6 @@ class FakeSpotifyPlaylistClient:
 
     def create_playlist(
         self,
-        user_id: str,
         *,
         name: str,
         description: str = "",
@@ -445,7 +443,6 @@ class FakeSpotifyPlaylistClient:
     ) -> dict[str, Any]:
         self.created_requests.append(
             {
-                "user_id": user_id,
                 "name": name,
                 "description": description,
                 "public": public,

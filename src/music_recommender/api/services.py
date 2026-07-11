@@ -42,11 +42,15 @@ from music_recommender.storage.dynamodb import (
 )
 
 
+def _load_demo_settings() -> Settings:
+    return load_settings(require_spotify=False)
+
+
 class DemoApiService:
     def __init__(
         self,
         *,
-        settings_loader: Callable[[], Settings] = load_settings,
+        settings_loader: Callable[[], Settings] = _load_demo_settings,
         dynamodb_client_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.settings_loader = settings_loader
@@ -133,7 +137,6 @@ class DemoApiService:
         playlist_service = PlaylistService(
             spotify_client=self._spotify_user_client(settings),
             store=self._playlist_store(settings),
-            user_id=settings.spotify_demo_user_id,
         )
         result = playlist_service.create_playlist(
             session_id=request.session_id,
@@ -316,6 +319,10 @@ class DemoApiService:
         return boto3.client("dynamodb")
 
     def _spotify_user_client(self, settings: Settings) -> SpotifyUserClient:
+        if not settings.spotify_client_id or not settings.spotify_client_secret:
+            raise ApiConfigurationError(
+                "SPOTIFY_APP_CLIENT_ID and SPOTIFY_APP_CLIENT_SECRET are required for this route."
+            )
         if not settings.spotify_user_refresh_token:
             raise ApiConfigurationError("SPOTIFY_USER_REFRESH_TOKEN is required for this route.")
         return SpotifyUserClient(

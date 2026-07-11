@@ -11,7 +11,6 @@ from music_recommender.models import JsonDict
 class SpotifyPlaylistClient(Protocol):
     def create_playlist(
         self,
-        user_id: str,
         *,
         name: str,
         description: str = "",
@@ -111,11 +110,9 @@ class PlaylistService:
         *,
         spotify_client: SpotifyPlaylistClient,
         store: PlaylistRecordStore,
-        user_id: str,
     ) -> None:
         self.spotify_client = spotify_client
         self.store = store
-        self.user_id = user_id
 
     def create_playlist(
         self,
@@ -131,7 +128,6 @@ class PlaylistService:
             return existing.to_result(idempotent_replay=True)
 
         playlist = self.spotify_client.create_playlist(
-            self.user_id,
             name=name,
             description=description,
             public=public,

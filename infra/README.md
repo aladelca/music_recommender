@@ -1,95 +1,106 @@
-# AWS Serverless Deployment
+# AWS Serverless Product Stack
 
-This deploys the backend-only class demo through AWS Lambda and API Gateway. Extracted catalog and
-profile datasets live in S3; runtime API state uses DynamoDB for profile cache, recommendation
-sessions, playlist idempotency, and feedback events.
+`infra/template.yaml` deploys Outside the Loop's AWS backend. The normal product deployment sets
+`DeployLegacyDemo=false` and creates no S3 or DynamoDB data resources.
 
-## Resources
+## Product Resources
 
-- API Gateway HTTP API
-- Lambda function running `music_recommender.api.lambda_handler.handler`
-- Scheduled Lambda function refreshing the configured Spotify profile cache every day
-- EventBridge schedule with a configurable expression
-- DynamoDB tables for demo users/profile cache, recommendation sessions, playlist records, and
-  feedback events, with point-in-time recovery, encryption, and retention on stack deletion
-- S3 read permissions for extracted recommender data
-- Secrets Manager read permission scoped by `AWS_SECRETS_PREFIX`
-- CloudWatch API access logs, Lambda log retention, and Lambda error alarms
+- API Gateway HTTP API with bounded throttling and redacted access logs.
+- `OutsideTheLoopApiFunction`, a thin FastAPI/Mangum Lambda for OAuth and product APIs.
+- Customer-managed rotating KMS key for Spotify refresh tokens and OAuth PKCE verifiers.
+- FIFO discovery queue and FIFO dead-letter queue.
+- `OutsideTheLoopDiscoveryWorkerFunction` for automated ListenBrainz Core API expansion.
+- `OutsideTheLoopCleanupFunction` on a daily EventBridge schedule.
+- 30-day Lambda/API log groups, CloudWatch/Lambda/SQS/EMF alarms, and an encrypted SNS topic with an
+  operator email subscription.
 
-## Prerequisites
+Supabase Postgres is provisioned outside this template and reached through a TLS transaction-pooler
+DSN stored in Secrets Manager. Runtime connections use the migration-defined
+`outside_loop_runtime` role, not the `postgres` owner. Vercel is provisioned separately and
+rewrites browser `/api/*` calls to the `ProductApiUrl` output.
 
-- AWS credentials configured for the target account
-- AWS SAM CLI installed
-- A deployed or bootstrapped recommender data bucket
-- An ignored `.env` containing the Spotify/OpenAI runtime values
+Product functions have no S3 environment variables, no S3 IAM actions, and no local catalog input.
+Their scoped requirements exclude PyArrow, OpenAI, Pandas, and NumPy.
 
-Create or update the JSON runtime secret without placing secret values in shell history:
+## Required Parameters
 
-```bash
-AWS_REGION_VALUE=us-east-1 \
-RUNTIME_SECRET_NAME=music-recommender/demo/runtime \
-bash scripts/sync_runtime_secret.sh
-```
+| Parameter | Example | Purpose |
+| --- | --- | --- |
+| `ProductAuthMode` | `hybrid` then `spotify_session` | Compatibility rollout/auth enforcement |
+| `AppBaseUrl` | `https://outside-the-loop.vercel.app` | Cookie Origin and Spotify callback origin |
+| `ProductRuntimeSecretName` | `music-recommender/product/runtime` | Backend-only credential JSON |
+| `MusicBrainzContactEmail` | operator email | Source User-Agent and SNS subscription |
+| `SpotifyMarket` | `US` | Post-ranking Spotify lookup market |
+| `DeployLegacyDemo` | `false` | Must remain false for the product |
 
-The script preserves an existing `RECOMMENDER_API_KEY`, generates a strong one when absent, and
-never prints the secret payload. Deploy again after changing the secret because CloudFormation
-resolves the secret values into Lambda environment variables during a stack update.
+The runtime secret must contain `SPOTIFY_APP_CLIENT_ID`, `SPOTIFY_APP_CLIENT_SECRET`,
+`SUPABASE_DB_URL`, and `OBSERVABILITY_HASH_KEY`.
 
-## Build And Deploy
+## Build And Validate
 
 From the repository root:
 
 ```bash
-STACK_NAME=music-recommender-demo \
+bash scripts/prepare_lambda_build.sh
+sam validate --lint --template-file infra/template.yaml
+sam build --template-file infra/template.yaml
+bash scripts/prune_lambda_artifacts.sh
+```
+
+Five isolated build contexts are created for legacy API, legacy profile sync, product API,
+discovery worker, and cleanup. Preparation/pruning rejects `.parquet`, `.csv`, and `.env` anywhere
+in an artifact. Product artifacts must remain below 128 MiB unzipped; every Lambda must remain below
+AWS's 256 MiB limit.
+
+## Deploy
+
+Use the wrapper rather than raw `sam deploy` so database migration preflight and package policy run:
+
+```bash
+STACK_NAME=outside-the-loop-beta \
 AWS_REGION_VALUE=us-east-1 \
-DATA_BUCKET_NAME=<your-music-recommender-bucket> \
-CATALOG_RUN_ID=<catalog-run-id> \
-INTERACTION_RUN_ID=<profile-run-id> \
-RUNTIME_SECRET_NAME=music-recommender/demo/runtime \
+APP_BASE_URL=https://<project>.vercel.app \
+MUSICBRAINZ_CONTACT_EMAIL=<operator@example.com> \
+PRODUCT_RUNTIME_SECRET_NAME=music-recommender/product/runtime \
+PRODUCT_AUTH_MODE=hybrid \
+DEPLOY_LEGACY_DEMO=false \
 bash scripts/deploy_api_sam.sh
 ```
 
-Suggested guided values:
-
-```text
-Stack Name: music-recommender-demo
-AWS Region: us-east-1
-Parameter DataBucketName: <your-music-recommender-bucket>
-Parameter DataPrefix: <optional-prefix-containing-silver-gold-metadata/>
-Parameter CatalogRunId: <catalog-run-id>
-Parameter InteractionRunId: <profile-run-id>
-Parameter RuntimeSecretName: music-recommender/demo/runtime
-Parameter AwsSecretsPrefix: music-recommender/demo/
-Parameter ProfileSyncScheduleExpression: cron(0 10 * * ? *)
-```
-
-After deployment, run the redacted end-to-end smoke suite. It retrieves the API URL and API key
-from AWS, tests authentication and every route, and creates one private Spotify smoke playlist:
+Then run:
 
 ```bash
-STACK_NAME=music-recommender-demo \
+STACK_NAME=outside-the-loop-beta \
 AWS_REGION_VALUE=us-east-1 \
 bash scripts/smoke_test_deployed_api.sh
 ```
 
-## Upload Existing Local Runs
+Safe outputs include product API/function names, queue/DLQ URLs, and KMS ARN. Confirm the SNS email
+subscription after first deployment.
 
-When a local run is already present under `data/local/<run-id>/`, upload it to the bucket root:
+## IAM Boundary
 
-```bash
-MUSIC_RECOMMENDER_BUCKET=<your-music-recommender-bucket> \
-bash scripts/upload_local_run_to_s3.sh <catalog-run-id>
-```
+The product API can encrypt/decrypt only with the stack token key and send only to the discovery
+queue. The SQS event mapping grants the worker queue-consume access. Database credentials arrive as
+deployment-time Secrets Manager dynamic references. Product functions do not receive
+`secretsmanager:GetSecretValue` or any `s3:*` action.
 
-The recommender S3 reader expects promoted `silver` and `gold` datasets at the bucket root and
-filters rows by `source_run_id`.
+GitHub deployment uses OIDC in `.github/workflows/deploy-aws.yml`; configure a scoped
+`AWS_DEPLOY_ROLE_ARN` repository/environment variable and require production approval. Do not store
+long-lived AWS access keys in GitHub.
 
-The deployment script prepares ignored, function-specific build contexts under `.lambda-build/` so
-local datasets and development dependencies are never copied into Lambda artifacts. Recompile the
-tracked `infra/lambda/*-requirements.txt` files from their `.in` files when runtime dependencies
-change. The preparation step explicitly rejects every `.parquet` and `.csv` file; those datasets
-remain in S3 and are read at runtime.
+`infra/deployment-role-template.yaml` bootstraps the GitHub OIDC provider, private versioned SAM
+artifact bucket, deployment role, and separate CloudFormation execution role. Configure its safe
+outputs as `AWS_DEPLOY_ROLE_ARN`, `AWS_SAM_ARTIFACT_BUCKET`, and
+`AWS_CLOUDFORMATION_EXECUTION_ROLE_ARN`. The deployment role can put versions only on the named
+product runtime secret, which supports credential rotation without a root deployment.
 
-The stack retains DynamoDB tables during stack deletion or replacement. This protects runtime state
-but means table cleanup is a separate, deliberate operation. See
-`docs/operational-aws-runbook.md` for monitoring and rollback commands.
+## Legacy Condition
+
+The old `MusicRecommender*` API, profile scheduler, DynamoDB tables, S3 configuration, and legacy
+alarms are all guarded by `DeployLegacy`. They exist only to preserve the educational demo and are
+not a product rollback data source. Do not set `DeployLegacyDemo=true` in the five-user stack.
+
+See [the architecture runbook](../docs/aws-deployment-architecture-runbook.md) and
+[operations runbook](../docs/operational-aws-runbook.md) for trust boundaries, migration, alarms,
+incidents, and rollback.

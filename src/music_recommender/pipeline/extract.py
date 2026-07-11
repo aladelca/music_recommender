@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
-from music_recommender.ingest.parse_base import normalize_lookup_key, parse_seed_artists
+from music_recommender.ingest.parse_base import parse_seed_artists
 from music_recommender.models import (
     AudioFeaturesRecord,
     ExtractionSummary,
@@ -19,6 +19,7 @@ from music_recommender.models import (
     SpotifyArtist,
     SpotifyTrack,
 )
+from music_recommender.normalization import normalize_lookup_key
 from music_recommender.storage.s3 import FileFormat, S3Storage, medallion_data_key, run_metadata_key
 
 LOGGER = logging.getLogger(__name__)

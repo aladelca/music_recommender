@@ -1,27 +1,38 @@
 from __future__ import annotations
 
 import base64
+import string
 import urllib.parse
+from collections.abc import Callable
 
 import httpx
 import pytest
 
 from music_recommender.sources.http import ApiHttpClient
 from music_recommender.sources.spotify_user import (
+    SpotifyPermissionDenied,
+    SpotifyRateLimited,
+    SpotifyReauthorizationRequired,
+    SpotifyResponseError,
     SpotifyScopeError,
+    SpotifyServiceUnavailable,
     SpotifyUserClient,
     build_authorization_url,
+    generate_pkce_verifier,
     missing_required_scopes,
+    pkce_code_challenge,
     spotify_track_uri,
 )
 
 
 def test_build_authorization_url_includes_required_query_parameters() -> None:
+    code_challenge = pkce_code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
     url = build_authorization_url(
         client_id="client",
         redirect_uri="http://127.0.0.1:8080/callback",
         scopes=("user-top-read", "playlist-modify-private"),
         state="state-1",
+        code_challenge=code_challenge,
     )
 
     parsed = urllib.parse.urlparse(url)
@@ -35,6 +46,46 @@ def test_build_authorization_url_includes_required_query_parameters() -> None:
     assert params["redirect_uri"] == ["http://127.0.0.1:8080/callback"]
     assert params["scope"] == ["user-top-read playlist-modify-private"]
     assert params["state"] == ["state-1"]
+    assert params["code_challenge"] == ["E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"]
+    assert params["code_challenge_method"] == ["S256"]
+
+
+def test_generate_pkce_verifier_is_rfc_7636_compatible() -> None:
+    verifier = generate_pkce_verifier()
+
+    assert 43 <= len(verifier) <= 128
+    assert set(verifier) <= set(string.ascii_letters + string.digits + "-._~")
+
+
+def test_exchange_authorization_code_sends_pkce_verifier() -> None:
+    captured_request: httpx.Request | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "access",
+                "expires_in": 3600,
+                "refresh_token": "refresh-1",
+                "scope": "playlist-modify-private",
+            },
+            request=request,
+        )
+
+    client = build_client(auth_transport=httpx.MockTransport(handler))
+
+    client.exchange_authorization_code(
+        code="authorization-code",
+        redirect_uri="https://outside-the-loop-beta.vercel.app/api/auth/callback",
+        code_verifier="dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        required_scopes=("playlist-modify-private",),
+    )
+
+    assert captured_request is not None
+    form = urllib.parse.parse_qs(captured_request.content.decode("utf-8"))
+    assert form["code_verifier"] == ["dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"]
 
 
 def test_refresh_access_token_uses_refresh_grant_and_basic_auth() -> None:
@@ -90,6 +141,31 @@ def test_refresh_access_token_rejects_missing_required_scopes() -> None:
         client.refresh_access_token(required_scopes=("user-top-read", "playlist-modify-private"))
 
 
+def test_refresh_access_token_publishes_rotated_refresh_token() -> None:
+    rotated_tokens: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "access",
+                "expires_in": 3600,
+                "refresh_token": "refresh-rotated",
+            },
+            request=request,
+        )
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(handler),
+        refresh_token_updated=rotated_tokens.append,
+    )
+
+    client.refresh_access_token()
+
+    assert client.refresh_token == "refresh-rotated"
+    assert rotated_tokens == ["refresh-rotated"]
+
+
 def test_user_profile_and_playlist_calls_use_bearer_token() -> None:
     requests: list[httpx.Request] = []
 
@@ -104,14 +180,18 @@ def test_user_profile_and_playlist_calls_use_bearer_token() -> None:
         requests.append(request)
         assert request.headers["authorization"] == "Bearer access"
         if request.url.path == "/v1/me":
-            return httpx.Response(200, json={"id": "12175364859"}, request=request)
+            return httpx.Response(
+                200,
+                json={"account_id": "account-1", "id": "12175364859"},
+                request=request,
+            )
         if request.url.path == "/v1/me/top/tracks":
             return httpx.Response(200, json={"items": [{"id": "track-1"}]}, request=request)
         if request.url.path == "/v1/me/tracks":
             return httpx.Response(
                 200, json={"items": [{"track": {"id": "saved-1"}}]}, request=request
             )
-        if request.url.path == "/v1/users/12175364859/playlists":
+        if request.url.path == "/v1/me/playlists":
             return httpx.Response(
                 201,
                 json={
@@ -120,7 +200,7 @@ def test_user_profile_and_playlist_calls_use_bearer_token() -> None:
                 },
                 request=request,
             )
-        if request.url.path == "/v1/playlists/playlist-1/tracks":
+        if request.url.path == "/v1/playlists/playlist-1/items":
             return httpx.Response(201, json={"snapshot_id": "snapshot-1"}, request=request)
         return httpx.Response(404, request=request)
 
@@ -130,10 +210,10 @@ def test_user_profile_and_playlist_calls_use_bearer_token() -> None:
     )
 
     assert client.get_current_user_profile()["id"] == "12175364859"
+    assert client.get_current_account_id() == "account-1"
     assert client.get_top_items("tracks", limit=1)["items"][0]["id"] == "track-1"
     assert client.get_saved_tracks(limit=1)["items"][0]["track"]["id"] == "saved-1"
     playlist = client.create_playlist(
-        "12175364859",
         name="Demo",
         description="Class demo",
         public=False,
@@ -144,6 +224,203 @@ def test_user_profile_and_playlist_calls_use_bearer_token() -> None:
     assert add_result["snapshot_id"] == "snapshot-1"
     add_request = requests[-1]
     assert add_request.read() == b'{"uris":["spotify:track:track-1","spotify:track:track-2"]}'
+
+
+def test_current_account_id_is_required_for_product_identity() -> None:
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "access", "expires_in": 3600},
+            request=request,
+        )
+
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "legacy-user-id"}, request=request)
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(auth_handler),
+        api_transport=httpx.MockTransport(api_handler),
+    )
+
+    with pytest.raises(SpotifyResponseError, match="account_id"):
+        client.get_current_account_id()
+
+
+def test_search_tracks_uses_bounded_post_ranking_query() -> None:
+    captured_request: httpx.Request | None = None
+
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "access", "expires_in": 3600},
+            request=request,
+        )
+
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(
+            200,
+            json={"tracks": {"items": [{"id": "spotify-track-1"}]}},
+            request=request,
+        )
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(auth_handler),
+        api_transport=httpx.MockTransport(api_handler),
+    )
+
+    tracks = client.search_tracks("isrc:GBF089400123", limit=3, market="CA")
+
+    assert tracks == ({"id": "spotify-track-1"},)
+    assert captured_request is not None
+    assert captured_request.url.path == "/v1/search"
+    assert urllib.parse.parse_qs(captured_request.url.query.decode("utf-8")) == {
+        "q": ["isrc:GBF089400123"],
+        "type": ["track"],
+        "limit": ["3"],
+        "market": ["CA"],
+    }
+
+
+def test_get_tracks_fetches_only_the_post_ranking_spotify_ids() -> None:
+    captured_request: httpx.Request | None = None
+
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "access", "expires_in": 3600},
+            request=request,
+        )
+
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(
+            200,
+            json={"tracks": [{"id": "track-1"}, {"id": "track-2"}]},
+            request=request,
+        )
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(auth_handler),
+        api_transport=httpx.MockTransport(api_handler),
+    )
+
+    tracks = client.get_tracks(("track-1", "track-2", "track-1"), market="CA")
+
+    assert [track["id"] for track in tracks] == ["track-1", "track-2"]
+    assert captured_request is not None
+    assert captured_request.url.path == "/v1/tracks"
+    assert urllib.parse.parse_qs(captured_request.url.query.decode("utf-8")) == {
+        "ids": ["track-1,track-2"],
+        "market": ["CA"],
+    }
+
+
+def test_replace_playlist_items_is_an_idempotent_exact_reviewed_set() -> None:
+    captured_request: httpx.Request | None = None
+
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "access", "expires_in": 3600},
+            request=request,
+        )
+
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(200, json={"snapshot_id": "snapshot-1"}, request=request)
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(auth_handler),
+        api_transport=httpx.MockTransport(api_handler),
+    )
+
+    result = client.replace_playlist_items("playlist-1", ["track-1", "track-2"])
+
+    assert result == {"snapshot_id": "snapshot-1"}
+    assert captured_request is not None
+    assert captured_request.method == "PUT"
+    assert captured_request.url.path == "/v1/playlists/playlist-1/items"
+    assert captured_request.read() == (
+        b'{"uris":["spotify:track:track-1","spotify:track:track-2"]}'
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (401, SpotifyReauthorizationRequired),
+        (403, SpotifyPermissionDenied),
+        (429, SpotifyRateLimited),
+        (500, SpotifyServiceUnavailable),
+    ],
+)
+def test_spotify_api_errors_are_classified_and_redacted(
+    status_code: int,
+    expected_error: type[Exception],
+) -> None:
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "access", "expires_in": 3600},
+            request=request,
+        )
+
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json={"error": {"message": "secret-response-detail"}},
+            request=request,
+        )
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(auth_handler),
+        api_transport=httpx.MockTransport(api_handler),
+        api_max_retries=0,
+    )
+
+    with pytest.raises(expected_error) as error:
+        client.get_current_user_profile()
+
+    assert "secret-response-detail" not in str(error.value)
+    assert "access" not in str(error.value)
+
+
+def test_spotify_api_honors_retry_after_before_retrying() -> None:
+    api_calls = 0
+    sleeps: list[float] = []
+
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "access", "expires_in": 3600},
+            request=request,
+        )
+
+    def api_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal api_calls
+        api_calls += 1
+        if api_calls == 1:
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "0.25"},
+                request=request,
+            )
+        return httpx.Response(200, json={"account_id": "account-1"}, request=request)
+
+    client = build_client(
+        auth_transport=httpx.MockTransport(auth_handler),
+        api_transport=httpx.MockTransport(api_handler),
+        api_max_retries=1,
+        api_sleep=sleeps.append,
+    )
+
+    assert client.get_current_account_id() == "account-1"
+    assert api_calls == 2
+    assert sleeps == [0.25]
 
 
 def test_paginated_user_profile_reads() -> None:
@@ -243,11 +520,15 @@ def build_client(
     *,
     auth_transport: httpx.MockTransport,
     api_transport: httpx.MockTransport | None = None,
+    api_max_retries: int = 3,
+    api_sleep: Callable[[float], None] | None = None,
+    refresh_token_updated: Callable[[str], None] | None = None,
 ) -> SpotifyUserClient:
     return SpotifyUserClient(
         client_id="client",
         client_secret="secret",
         refresh_token="refresh",
+        refresh_token_updated=refresh_token_updated,
         auth_http=ApiHttpClient(
             client=httpx.Client(
                 transport=auth_transport,
@@ -259,6 +540,8 @@ def build_client(
                 transport=api_transport
                 or httpx.MockTransport(lambda request: httpx.Response(404, request=request)),
                 base_url="https://api.spotify.com/v1",
-            )
+            ),
+            max_retries=api_max_retries,
+            sleep=api_sleep or (lambda _: None),
         ),
     )
